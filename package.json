@@ -1,0 +1,43 @@
+{
+  "name": "pi-tool-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi extension that corrects LLM tool calls: normalizes argument aliases for edit/write/read and strips trailing pipeline extractors from bash commands",
+  "main": "index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "argument-normalization",
+    "alias-correction",
+    "tool-override",
+    "pipeline-optimization"
+  ],
+  "author": "Jiajun Chen <tychenjiajun@gmail.com>",
+  "license": "MIT",
+  "files": [
+    "*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "packageManager": "pnpm@11.6.0",
+  "dependencies": {
+    "unbash": "^4.0.1"
+  }
+}
