@@ -6,9 +6,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const FAST_THRESHOLD_MS = 10_000;
 
-export function buildNotice(removedNames: string[]): string {
+export type NoticeMode = "fast" | "slow";
+
+export function buildNotice(removedNames: string[], mode: NoticeMode = "slow"): string {
   const list = removedNames.map((r) => `\`${r}\``).join(", ");
-  return `[pi-tool-guard] Removed trailing pipeline commands: ${list}. The full output is above — do NOT re-run with different parameters.`;
+  const suffix = mode === "fast"
+    ? `Filtered via ${list} — full output was small enough to pipe.`
+    : `The full output is above — do NOT re-run with different parameters.`;
+  return `[pi-tool-guard] Removed trailing pipeline commands: ${list}. ${suffix}`;
 }
 
 /**

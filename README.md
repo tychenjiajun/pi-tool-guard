@@ -33,20 +33,19 @@ When the LLM calls a tool with wrong field names, the extension normalizes them 
 
 ### 2. Bash pipeline extractor stripping
 
-When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to slow commands, the extension strips them so the full output is available. This prevents the LLM from repeatedly re-running slow commands with different truncation parameters.
+When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash commands, the extension strips them and applies the extractor intelligently.
 
 **Three-case strategy:**
 
-| Scenario | Behavior |
-|---|---|
-| Output truncated (has `Full output: <file>`) | Run extractor on the full output file, return filtered result |
-| Fast command (< 10s), no truncation | Pipe result through extractor, return filtered result |
-| Slow command, no truncation | Return full result with notice |
+| Scenario | UI Notification | LLM Response |
+|---|---|---|
+| Fast command (< 10s), truncated | `Filtered via \`head\`` | Filtered result only |
+| Fast command (< 10s), not truncated | `Filtered via \`head\`` | Filtered result only |
+| Slow command (truncated or not) | `The full output is above...` | Result + `This is a slow command. Avoid re-running...` |
 
 **Example:** `vitest run | tail -n 10`
-- If vitest output is truncated → run `tail` on the saved full output file
-- If vitest finishes in < 10s → pipe result through `tail`
-- If vitest is slow but not truncated → return full output + notice
+- If vitest finishes in < 10s → run `tail` on result (or full output file if truncated), notify UI
+- If vitest is slow → return result as-is, notify UI, append slow-command hint to LLM
 
 **Detected extractors:** `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `less`, `more`, `column`, `jq`, `yq`, `tr`
 
@@ -62,8 +61,20 @@ Both features use `prepareArguments` on overridden built-in tools — the cleane
 - **bash**: `createBashToolDefinition(cwd)` + custom `execute` override:
   1. `prepareArguments` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash), strips trailing extractors
   2. `execute` runs the stripped command via the original built-in execute
-  3. If truncated → runs extractor on the full output file via `pi.exec`
-  4. If fast (< 10s) → pipes result through extractor via `pi.exec`
-  5. If slow → returns full result with notice
+  3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
+  4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
+  5. If slow (truncated or not) → returns result as-is with notice
 
 No error recovery, no session scanning.
+
+## Development
+
+```bash
+pnpm install
+pnpm test        # Run all tests
+pnpm typecheck   # Type check
+```
+
+## License
+
+MIT
