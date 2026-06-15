@@ -39,9 +39,11 @@ pi install npm:pi-tool-guard
 
 | 场景 | UI 通知 | LLM 响应 |
 |---|---|---|
-| 快速命令（< 10秒），已截断 | `Filtered via \`head\`` | 仅返回过滤后的结果 |
-| 快速命令（< 10秒），未截断 | `Filtered via \`head\`` | 仅返回过滤后的结果 |
+| 快速命令（< 10秒），已截断 | `Filtered via \`head -5\`` | 仅返回过滤后的结果 |
+| 快速命令（< 10秒），未截断 | `Filtered via \`head -5\`` | 仅返回过滤后的结果 |
 | 慢速命令（无论是否截断） | `The full output is above...` | 结果 + `This is a slow command. Avoid re-running...` |
+
+> **通知格式**: UI 通知会显示完整的原始命令和提取的管道。示例：`Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.`
 
 **示例：** `vitest run | tail -n 10`
 - 如果 vitest 在 10 秒内完成 → 对结果运行 `tail`（如果已截断则对完整输出文件运行），通知 UI

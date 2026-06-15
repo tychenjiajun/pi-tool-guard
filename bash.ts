@@ -8,12 +8,15 @@ export const FAST_THRESHOLD_MS = 10_000;
 
 export type NoticeMode = "fast" | "slow";
 
-export function buildNotice(removedNames: string[], mode: NoticeMode = "slow"): string {
-  const list = removedNames.map((r) => `\`${r}\``).join(", ");
+export function buildNotice(
+  removedPipeline: string,
+  originalCommand: string,
+  mode: NoticeMode = "slow",
+): string {
   const suffix = mode === "fast"
-    ? `Filtered via ${list} — full output was small enough to pipe.`
+    ? `Filtered via \`${removedPipeline}\` — full output was small enough to pipe.`
     : `The full output is above — do NOT re-run with different parameters.`;
-  return `[pi-tool-guard] Removed trailing pipeline commands: ${list}. ${suffix}`;
+  return `[pi-tool-guard] Removed trailing pipeline commands: \`${removedPipeline}\` from \`${originalCommand}\`. ${suffix}`;
 }
 
 /**

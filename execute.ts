@@ -41,17 +41,19 @@ export async function executeBashGuarded(
   execCtx: unknown,
 ): Promise<ToolResult> {
   const input = params as Record<string, unknown>;
-  const removedNames = input._piToolGuardRemoved as string[] | undefined;
+  const removedNamesRaw = input._piToolGuardRemoved;
   const removedPipeline = input._piToolGuardPipeline as string | undefined;
+  const originalCommand = input._piToolGuardOriginalCommand as string | undefined;
 
   // No extractors — run normally
-  if (!removedNames || removedNames.length === 0 || !removedPipeline) {
+  if (!Array.isArray(removedNamesRaw) || removedNamesRaw.length === 0 || !removedPipeline || !originalCommand) {
     return ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
   }
 
   // Clean transient fields before running
   delete input._piToolGuardRemoved;
   delete input._piToolGuardPipeline;
+  delete input._piToolGuardOriginalCommand;
 
   // Run the stripped command
   const start = Date.now();
@@ -65,7 +67,7 @@ export async function executeBashGuarded(
     if (fullPath) {
       const extracted = await runExtractorOnFile(ctx.pi, fullPath, removedPipeline);
       if (extracted !== undefined) {
-        const uiNotice = buildNotice(removedNames, "fast");
+        const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
         ctx.ctx.ui.notify(uiNotice, "info");
         throw new Error(extracted);
       }
@@ -81,7 +83,7 @@ export async function executeBashGuarded(
   if (elapsed < FAST_THRESHOLD_MS && isTruncated) {
     const extracted = await runExtractorOnFile(ctx.pi, details!.fullOutputPath!, removedPipeline);
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(removedNames, "fast");
+      const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
       ctx.ctx.ui.notify(uiNotice, "info");
       return {
         content: [{ type: "text" as const, text: extracted }],
@@ -99,7 +101,7 @@ export async function executeBashGuarded(
 
     const extracted = await runExtractorOnText(ctx.pi, resultText, removedPipeline);
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(removedNames, "fast");
+      const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
       ctx.ctx.ui.notify(uiNotice, "info");
       return {
         content: [{ type: "text" as const, text: extracted }],
@@ -109,7 +111,7 @@ export async function executeBashGuarded(
   }
 
   // Case 3: Slow command (truncated or not) → return result with LLM notice
-  const uiNotice = buildNotice(removedNames, "slow");
+  const uiNotice = buildNotice(removedPipeline, originalCommand, "slow");
   ctx.ctx.ui.notify(uiNotice, "info");
   const llmNotice = `This is a slow command. Avoid re-running; prefer reading from the full output path if available.`;
   return {
@@ -127,6 +129,7 @@ export function prepareBashArguments(input: Record<string, unknown>): Record<str
 
   const stripped = stripTrailingExtractors(input.command);
   if (stripped) {
+    input._piToolGuardOriginalCommand = input.command;
     input.command = stripped.cleaned;
     input._piToolGuardRemoved = stripped.removedNames;
     input._piToolGuardPipeline = stripped.removedPipeline;

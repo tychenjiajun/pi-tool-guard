@@ -7,27 +7,28 @@ import { executeBashGuarded, prepareBashArguments, type ExecuteContext, type Too
 
 describe("buildNotice", () => {
   it("returns fast-mode notice when mode is 'fast'", () => {
-    const notice = buildNotice(["head"], "fast");
+    const notice = buildNotice("head -5", "ls -la | head -5", "fast");
     expect(notice).toContain("Filtered via");
     expect(notice).toContain("small enough to pipe");
     expect(notice).not.toContain("do NOT re-run");
   });
 
   it("returns slow-mode notice when mode is 'slow'", () => {
-    const notice = buildNotice(["head"], "slow");
+    const notice = buildNotice("head -5", "ls -la | head -5", "slow");
     expect(notice).toContain("The full output is above");
     expect(notice).toContain("do NOT re-run");
   });
 
   it("defaults to slow mode when no mode provided", () => {
-    const notice = buildNotice(["head"]);
+    const notice = buildNotice("head -5", "ls -la | head -5");
     expect(notice).toContain("The full output is above");
     expect(notice).toContain("do NOT re-run");
   });
 
-  it("lists multiple removed commands", () => {
-    const notice = buildNotice(["grep", "head"], "fast");
-    expect(notice).toContain("`grep`, `head`");
+  it("shows full original command and extractor pipeline", () => {
+    const notice = buildNotice("grep FAIL | head -5", "npm test | grep FAIL | head -5", "fast");
+    expect(notice).toContain("`grep FAIL | head -5`");
+    expect(notice).toContain("`npm test | grep FAIL | head -5`");
   });
 });
 
@@ -422,12 +423,14 @@ describe("prepareBashArguments", () => {
     expect(result.command).toBe("ls");
     expect(result._piToolGuardRemoved).toEqual(["head"]);
     expect(result._piToolGuardPipeline).toBe("head -5");
+    expect(result._piToolGuardOriginalCommand).toBe("ls | head -5");
   });
 
   it("does nothing for commands without extractors", () => {
     const result = prepareBashArguments({ command: "ls -la" });
     expect(result.command).toBe("ls -la");
     expect(result._piToolGuardRemoved).toBeUndefined();
+    expect(result._piToolGuardOriginalCommand).toBeUndefined();
   });
 
   it("handles non-string command gracefully", () => {

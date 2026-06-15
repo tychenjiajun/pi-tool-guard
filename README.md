@@ -39,9 +39,11 @@ When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash 
 
 | Scenario | UI Notification | LLM Response |
 |---|---|---|
-| Fast command (< 10s), truncated | `Filtered via \`head\`` | Filtered result only |
-| Fast command (< 10s), not truncated | `Filtered via \`head\`` | Filtered result only |
+| Fast command (< 10s), truncated | `Filtered via \`head -5\`` | Filtered result only |
+| Fast command (< 10s), not truncated | `Filtered via \`head -5\`` | Filtered result only |
 | Slow command (truncated or not) | `The full output is above...` | Result + `This is a slow command. Avoid re-running...` |
+
+> **Notification format**: The UI notification shows both the full original command and the extracted pipeline. Example: `Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.`
 
 **Example:** `vitest run | tail -n 10`
 - If vitest finishes in < 10s → run `tail` on result (or full output file if truncated), notify UI
