@@ -39,8 +39,8 @@ When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash 
 
 | Scenario | UI Notification | LLM Response |
 |---|---|---|
-| Fast command (< 10s), truncated | `Filtered via \`head -5\`` | Filtered result only |
-| Fast command (< 10s), not truncated | `Filtered via \`head -5\`` | Filtered result only |
+| Fast command (< 10s), truncated | `Filtered via \`head -5\` — the large output was piped from its temp file.` | Filtered result only |
+| Fast command (< 10s), not truncated | `Filtered via \`head -5\` — full output was small enough to pipe.` | Filtered result only |
 | Slow command (truncated or not) | `The full output is above...` | Result + `This is a slow command. Avoid re-running...` |
 
 > **Notification format**: The UI notification shows both the full original command and the extracted pipeline. Example: `Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.`
@@ -52,6 +52,18 @@ When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash 
 **Detected extractors:** `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `less`, `more`, `column`, `jq`, `yq`, `tr`
 
 All trailing extractors are stripped: `npm test | grep FAIL | head -5` → strips `grep FAIL | head -5`
+
+**Timing split:** pi's built-in renderer prints one opaque `Took <total>` line. When the guard ran a stripped extractor (so the total includes guard's projection), that line is replaced with a SoL-Pi-style receipt:
+
+```
+🛡 pi-tool-guard · grep FAIL | head -5
+   Context saved · 1,234 → 20 lines · 98% smaller · 19 KiB saved
+   Took 6.5s  ██████████████░░░░  cmd 5.0s · filter 1.5s
+```
+
+The bar is proportional — accent `█` for the cleaned command, warning `░` for the guard's extractor. Slow commands run no extractor, so their line is left untouched.
+
+**Silent no-op:** when applying the extractor leaves the output unchanged (e.g. `tail -20` on a 2-line result), the guard shows no UI notice and no receipt — pi's plain `Took` line stays. Notices and receipts only fire when the projection actually changed the content.
 
 ---
 
@@ -86,6 +98,18 @@ interface PiToolGuardDetails {
   removedPipeline: string;   // e.g. "tail -20"
   outcome: "projection-applied" | "full-output";
   sourcePath?: string;       // untruncated output, when Pi produced one
+  timing?: {                 // per-phase wall clock, when guard took effect
+    commandMs: number;       // cleaned command execution
+    extractorMs: number;     // guard's extractor projection (0 when none ran)
+    totalMs: number;         // commandMs + extractorMs
+  };
+  projection?: {             // before/after size, when measurable
+    inputLines: number;
+    inputBytes: number;
+    outputLines: number;
+    outputBytes: number;
+  };
+  noop?: boolean;            // projection left the output unchanged
 }
 ```
 

@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, AgentToolResult, BashToolDetails } from "@earendil-works/pi-coding-agent";
 import {
   type EditToolInput,
   type ReadToolInput,
@@ -14,6 +14,8 @@ import {
   normalizeReadArgs,
 } from "./aliases.ts";
 import { executeBashGuarded } from "./execute.ts";
+import { readPiToolGuardDetails } from "./contract.ts";
+import { applyGuardReceipt, type ChildContainer } from "./render.ts";
 
 // ---------------------------------------------------------------------------
 // extension
@@ -60,6 +62,7 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
     // ./contract.ts for the details.piToolGuard record published downstream.
     const bashDef = createBashToolDefinition(ctx.cwd);
     const originalExecute = bashDef.execute;
+    const originalRenderResult = bashDef.renderResult;
 
     pi.registerTool({
       ...bashDef,
@@ -72,6 +75,33 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
           onUpdate,
           execCtx,
         );
+      },
+      // When the guard projected the output it ran an extra extractor after the
+      // command. Pi's built-in renderer still prints one opaque `Took <total>`
+      // line, so replace it with a SoL-Pi-style guard receipt. A no-op
+      // projection shows nothing — pi's plain `Took` line stays.
+      renderResult(result, options, theme, context) {
+        const renderOriginal = originalRenderResult as NonNullable<typeof originalRenderResult>;
+        const component = renderOriginal(
+          result as AgentToolResult<BashToolDetails | undefined>,
+          options,
+          theme,
+          context,
+        );
+        if (options.isPartial) return component;
+
+        const guard = readPiToolGuardDetails(result.details);
+        const timing = guard?.timing;
+        if (!guard || !timing || timing.extractorMs <= 0 || guard.noop) return component;
+
+        applyGuardReceipt(
+          component as unknown as ChildContainer,
+          theme,
+          guard,
+          timing,
+          context.state?.startedAt !== undefined,
+        );
+        return component;
       },
     });
 

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { buildNotice, FAST_THRESHOLD_MS, runExtractorOnText, runExtractorOnFile } from "./bash.ts";
+import { buildNotice, FAST_THRESHOLD_MS, isProjectionNoop, runExtractorOnText, runExtractorOnFile } from "./bash.ts";
 import { stripTrailingExtractors } from "./pipeline.ts";
 import { executeBashGuarded, type ExecuteContext, type ToolResult } from "./execute.ts";
 import { readPiToolGuardDetails } from "./contract.ts";
@@ -12,6 +17,14 @@ describe("buildNotice", () => {
     expect(notice).toContain("Filtered via");
     expect(notice).toContain("small enough to pipe");
     expect(notice).not.toContain("do NOT re-run");
+  });
+
+  it("returns fast-file notice when output came from the saved temp file", () => {
+    const notice = buildNotice("head -5", "ls -la | head -5", "fast-file");
+    expect(notice).toContain("Filtered via");
+    expect(notice).toContain("temp file");
+    // The truncated output was NOT small; do not claim it was.
+    expect(notice).not.toContain("small enough to pipe");
   });
 
   it("returns slow-mode notice when mode is 'slow'", () => {
@@ -30,6 +43,18 @@ describe("buildNotice", () => {
     const notice = buildNotice("grep FAIL | head -5", "npm test | grep FAIL | head -5", "fast");
     expect(notice).toContain("`grep FAIL | head -5`");
     expect(notice).toContain("`npm test | grep FAIL | head -5`");
+  });
+});
+
+describe("isProjectionNoop", () => {
+  it("treats trailing-whitespace-only differences as identical", () => {
+    expect(isProjectionNoop("a\nb", "a\nb\n")).toBe(true);
+    expect(isProjectionNoop("a\nb\n", "a\nb\n\n")).toBe(true);
+  });
+
+  it("detects a real reduction", () => {
+    expect(isProjectionNoop("a", "a\nb")).toBe(false);
+    expect(isProjectionNoop("", "a")).toBe(false);
   });
 });
 
@@ -59,9 +84,12 @@ describe("fast command behavior", () => {
 
     const result = await runExtractorOnText(mockPi, text, pipeline);
     expect(result).toBe("line1\nline2");
+    // `text` must travel as an argv element, not be spliced into the script.
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
-      expect.stringContaining("head -2"),
+      expect.stringContaining('"$1"'),
+      "bash",
+      text,
     ]);
   });
 
@@ -78,7 +106,9 @@ describe("fast command behavior", () => {
     expect(result).toBe("last line");
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
-      expect.stringContaining("tail -1"),
+      expect.stringContaining('"$1"'),
+      "bash",
+      filePath,
     ]);
   });
 
@@ -397,7 +427,9 @@ describe("executeBashGuarded", () => {
 
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
-      expect.stringContaining("/tmp/full-output.txt"),
+      expect.stringContaining('"$1"'),
+      "bash",
+      "/tmp/full-output.txt",
     ]);
     const textContent = result.content[0];
     if (textContent.type === "text") {
@@ -467,6 +499,8 @@ describe("executeBashGuarded", () => {
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
       expect.stringContaining("grep FAIL | head -5"),
+      "bash",
+      "FAIL test1\nFAIL test2\nPASS test3",
     ]);
     const textContent = result.content[0];
     if (textContent.type === "text") {
@@ -484,6 +518,95 @@ describe("executeBashGuarded", () => {
       removedPipeline: "grep FAIL | head -5",
       outcome: "projection-applied",
     });
+  });
+
+  it("splits wall clock into command and extractor timing", async () => {
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      mockOriginalExecute.mockImplementation(async () => {
+        clock += 5_000; // cleaned command runs for 5s
+        return { content: [{ type: "text", text: "a\nb\nc" }], details: undefined };
+      });
+      (mockPi.exec as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        clock += 1_500; // guard's extractor projection costs another 1.5s
+        return { code: 0, stdout: "a\nb" };
+      });
+
+      const result = await executeBashGuarded(
+        ctx,
+        "call-1",
+        { command: "ls | head -2" },
+        new AbortController().signal,
+        () => {},
+        {},
+      );
+
+      const guard = readPiToolGuardDetails(result.details);
+      expect(guard?.timing).toEqual({ commandMs: 5_000, extractorMs: 1_500, totalMs: 6_500 });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("shows no notice when the projection matches the original output", async () => {
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "line1\nline2\n" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "line1\nline2\n", // tail -20 on a 2-line output changes nothing
+    });
+
+    const result = await executeBashGuarded(
+      ctx,
+      "call-1",
+      { command: "ls | tail -20" },
+      new AbortController().signal,
+      () => {},
+      {},
+    );
+
+    expect(mockCtx.ui.notify).not.toHaveBeenCalled();
+    const textContent = result.content[0];
+    if (textContent.type === "text") {
+      expect(textContent.text).toBe("line1\nline2");
+    }
+    // The strip is still published for downstream consumers.
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("projection-applied");
+    expect(guard?.noop).toBe(true);
+  });
+
+  it("publishes projection savings for a real reduction", async () => {
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "b\na\nc\nd" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "a\nb", // sort + head does change the output
+    });
+
+    const result = await executeBashGuarded(
+      ctx,
+      "call-1",
+      { command: "cat | sort | head -2" },
+      new AbortController().signal,
+      () => {},
+      {},
+    );
+
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.noop).toBe(false);
+    expect(guard?.projection).toEqual({
+      inputLines: 4,
+      inputBytes: 7,
+      outputLines: 2,
+      outputBytes: 3,
+    });
+    expect(mockCtx.ui.notify).toHaveBeenCalled();
   });
 });
 
@@ -545,5 +668,101 @@ describe("readPiToolGuardDetails", () => {
     });
     expect(parsed).toBeDefined();
     expect("sourcePath" in parsed!).toBe(false);
+  });
+
+  it("parses per-phase timing when present", () => {
+    const parsed = readPiToolGuardDetails({
+      piToolGuard: {
+        version: 1,
+        originalCommand: "ls | head -2",
+        cleanedCommand: "ls",
+        removed: ["head"],
+        removedPipeline: "head -2",
+        outcome: "projection-applied",
+        timing: { commandMs: 5_000, extractorMs: 1_500, totalMs: 6_500 },
+      },
+    });
+    expect(parsed?.timing).toEqual({ commandMs: 5_000, extractorMs: 1_500, totalMs: 6_500 });
+  });
+
+  it("parses projection stats and the noop flag", () => {
+    const parsed = readPiToolGuardDetails({
+      piToolGuard: {
+        version: 1,
+        originalCommand: "ls | tail -20",
+        cleanedCommand: "ls",
+        removed: ["tail"],
+        removedPipeline: "tail -20",
+        outcome: "projection-applied",
+        noop: false,
+        projection: { inputLines: 1_234, inputBytes: 20_480, outputLines: 20, outputBytes: 1_024 },
+      },
+    });
+    expect(parsed?.noop).toBe(false);
+    expect(parsed?.projection).toEqual({
+      inputLines: 1_234,
+      inputBytes: 20_480,
+      outputLines: 20,
+      outputBytes: 1_024,
+    });
+  });
+
+  it("drops malformed timing/projection instead of failing the whole record", () => {
+    const parsed = readPiToolGuardDetails({
+      piToolGuard: {
+        version: 1,
+        originalCommand: "a",
+        cleanedCommand: "a",
+        removed: [],
+        removedPipeline: "",
+        outcome: "full-output",
+        timing: { commandMs: "soon" },
+        projection: { inputLines: 1 },
+        noop: "maybe",
+      },
+    });
+    expect(parsed).toBeDefined();
+    expect(parsed?.timing).toBeUndefined();
+    expect(parsed?.projection).toBeUndefined();
+    expect(parsed?.noop).toBeUndefined();
+  });
+});
+
+describe("extractor execution (real shell)", () => {
+  const execFileAsync = promisify(execFile);
+
+  async function realExec(command: string, args: string[]) {
+    try {
+      const { stdout, stderr } = await execFileAsync(command, args);
+      return { stdout, stderr, code: 0, killed: false };
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string; code?: number };
+      return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", code: e.code ?? 1, killed: false };
+    }
+  }
+
+  const pi = { exec: realExec } as unknown as ExtensionAPI;
+
+  it("preserves real newlines so line-based extractors work", async () => {
+    const out = await runExtractorOnText(pi, "FAIL test1\nFAIL test2\nPASS test3", "tail -1");
+    expect(out).toBe("PASS test3");
+  });
+
+  it("does not expand $() or backticks from command output", async () => {
+    const text = "$(echo pwned)\n`echo pwned`";
+    const out = await runExtractorOnText(pi, text, "cat");
+    expect(out).toBe(text);
+  });
+
+  it("filters a file whose path contains spaces", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-tool-guard-"));
+    const file = join(dir, "with space.txt");
+    await writeFile(file, "alpha\nbeta\n");
+    try {
+      const out = await runExtractorOnFile(pi, file, "head -1");
+      expect(out).toBe("alpha");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

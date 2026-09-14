@@ -6,14 +6,19 @@ import {
 import {
   FAST_THRESHOLD_MS,
   buildNotice,
+  isProjectionNoop,
   runExtractorOnFile,
   runExtractorOnText,
 } from "./bash.ts";
+import { formatProjectionSavings, measureText } from "./format.ts";
+import { showGuardStatus } from "./tui.ts";
 import {
   PI_TOOL_GUARD_CONTRACT_VERSION,
   PI_TOOL_GUARD_DETAILS_KEY,
   type PiToolGuardDetails,
   type PiToolGuardOutcome,
+  type PiToolGuardProjection,
+  type PiToolGuardTiming,
 } from "./contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -66,12 +71,25 @@ function withGuardDetails(
   };
 }
 
+/**
+ * Join a tool result's text content into the string the cleaned command
+ * produced — the "original" output guard's projection is compared against.
+ */
+function resultText(result: ToolResult): string {
+  return result.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
+}
+
 function guardRecord(
   originalCommand: string,
   cleanedCommand: string,
   stripped: { removedNames: string[]; removedPipeline: string },
   outcome: PiToolGuardOutcome,
   sourcePath: string | undefined,
+  timing: PiToolGuardTiming,
+  extras: { projection?: PiToolGuardProjection; noop?: boolean } = {},
 ): PiToolGuardDetails {
   return {
     version: PI_TOOL_GUARD_CONTRACT_VERSION,
@@ -81,6 +99,8 @@ function guardRecord(
     removedPipeline: stripped.removedPipeline,
     outcome,
     ...(sourcePath ? { sourcePath } : {}),
+    timing,
+    ...extras,
   };
 }
 
@@ -114,7 +134,7 @@ export async function executeBashGuarded(
   // evidence-preserving reducer hashes and cites in its receipt.
   const cleanedParams = { ...input, command: stripped.cleaned };
 
-  const start = Date.now();
+  const commandStart = Date.now();
   let result: ToolResult;
   try {
     result = await ctx.originalExecute(toolCallId, cleanedParams, signal, onUpdate, execCtx);
@@ -127,7 +147,7 @@ export async function executeBashGuarded(
     if (fullPath) {
       const extracted = await runExtractorOnFile(ctx.pi, fullPath, stripped.removedPipeline);
       if (extracted !== undefined) {
-        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
+        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast-file");
         ctx.ctx.ui.notify(uiNotice, "info");
         throw new Error(extracted);
       }
@@ -135,16 +155,26 @@ export async function executeBashGuarded(
     throw err;
   }
 
-  const elapsed = Date.now() - start;
+  // Time spent applying the stripped extractor pipeline. Accumulated across a
+  // failed attempt so the illustration still shows guard's wasted cost.
+  const commandMs = Date.now() - commandStart;
+  let extractorMs = 0;
+  const totalMs = () => commandMs + extractorMs;
   const resultDetails = result.details as BashToolDetails | undefined;
   const fullOutputPath = resultDetails?.fullOutputPath;
 
   // Case 1: Fast command, truncated → run extractor on the full output file
-  if (elapsed < FAST_THRESHOLD_MS && fullOutputPath) {
+  if (commandMs < FAST_THRESHOLD_MS && fullOutputPath) {
+    const extractorStart = Date.now();
     const extracted = await runExtractorOnFile(ctx.pi, fullOutputPath, stripped.removedPipeline);
+    extractorMs += Date.now() - extractorStart;
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
-      ctx.ctx.ui.notify(uiNotice, "info");
+      const noop = isProjectionNoop(extracted, resultText(result));
+      if (!noop) {
+        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast-file");
+        ctx.ctx.ui.notify(uiNotice, "info");
+        showGuardStatus(ctx.ctx, `🛡 ${stripped.removedPipeline} · piped the saved temp file`);
+      }
       return withGuardDetails(
         {
           content: [{ type: "text" as const, text: extracted }],
@@ -156,22 +186,39 @@ export async function executeBashGuarded(
           stripped,
           "projection-applied",
           fullOutputPath,
+          { commandMs, extractorMs, totalMs: totalMs() },
+          { noop },
         ),
       );
     }
   }
 
   // Case 2: Fast command, not truncated → pipe result through extractor
-  if (elapsed < FAST_THRESHOLD_MS && !fullOutputPath) {
-    const resultText = result.content
-      .filter((c): c is { type: "text"; text: string } => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
+  if (commandMs < FAST_THRESHOLD_MS && !fullOutputPath) {
+    const originalText = resultText(result);
+    const originalSize = measureText(originalText);
 
-    const extracted = await runExtractorOnText(ctx.pi, resultText, stripped.removedPipeline);
+    const extractorStart = Date.now();
+    const extracted = await runExtractorOnText(ctx.pi, originalText, stripped.removedPipeline);
+    extractorMs += Date.now() - extractorStart;
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
-      ctx.ctx.ui.notify(uiNotice, "info");
+      const projectedSize = measureText(extracted);
+      const projection: PiToolGuardProjection = {
+        inputLines: originalSize.lines,
+        inputBytes: originalSize.bytes,
+        outputLines: projectedSize.lines,
+        outputBytes: projectedSize.bytes,
+      };
+      const noop = isProjectionNoop(extracted, originalText);
+
+      if (!noop) {
+        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
+        ctx.ctx.ui.notify(uiNotice, "info");
+        showGuardStatus(
+          ctx.ctx,
+          `🛡 ${stripped.removedPipeline} · ${formatProjectionSavings(projection)}`,
+        );
+      }
       return withGuardDetails(
         {
           content: [{ type: "text" as const, text: extracted }],
@@ -183,6 +230,8 @@ export async function executeBashGuarded(
           stripped,
           "projection-applied",
           undefined,
+          { commandMs, extractorMs, totalMs: totalMs() },
+          { projection, noop },
         ),
       );
     }
@@ -191,6 +240,7 @@ export async function executeBashGuarded(
   // Case 3: Slow command (truncated or not) → return result with LLM notice
   const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
   ctx.ctx.ui.notify(uiNotice, "info");
+  showGuardStatus(ctx.ctx, `🛡 ${stripped.removedPipeline} · full output kept`);
   const llmNotice = `This is a slow command. Avoid re-running; prefer reading from the full output path if available.`;
   return withGuardDetails(
     {
@@ -203,6 +253,7 @@ export async function executeBashGuarded(
       stripped,
       "full-output",
       fullOutputPath,
+      { commandMs, extractorMs, totalMs: totalMs() },
     ),
   );
 }

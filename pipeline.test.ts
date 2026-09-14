@@ -318,6 +318,42 @@ describe("stripTrailingExtractors", () => {
       expect(r!.cleaned).toBe('echo "=== TOP CPU ===" && ps aux --sort=-%cpu 2>/dev/null | head -15 && echo "=== TOP MEM ===" && ps aux --sort=-%mem 2>/dev/null');
     });
   });
+
+  describe("multiple ;-separated statements", () => {
+    it("ignores an extractor that is not in the final statement", () => {
+      // `head` ends the first statement, not the whole command. Nothing
+      // trailing should be stripped, and `echo b` must survive.
+      expect(stripTrailingExtractors("echo a | head; echo b")).toBeUndefined();
+    });
+
+    it("strips only the final statement's extractor and keeps earlier statements", () => {
+      const r = stripTrailingExtractors("echo a; ls | head");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe("echo a; ls");
+    });
+
+    it("keeps a mid-command pipeline intact when only the tail is stripped", () => {
+      const cmd = 'cd /tmp && grep -n "x" f.ts | head -20; echo ====; grep -n "y" f.ts | grep -n "z"';
+      const r = stripTrailingExtractors(cmd);
+      expect(r).toBeDefined();
+      // The final `grep -n "z"` is the trailing extractor...
+      expect(r!.removedNames).toEqual(["grep"]);
+      expect(r!.removedPipeline).toBe('grep -n "z"');
+      // ...and everything before it (including the mid-command `| head -20`
+      // and the `echo ====`) is preserved verbatim.
+      expect(r!.cleaned).toBe(
+        'cd /tmp && grep -n "x" f.ts | head -20; echo ====; grep -n "y" f.ts',
+      );
+    });
+
+    it("does not drop a later statement when stripping the last one", () => {
+      const r = stripTrailingExtractors("ls | head; echo done | tail");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["tail"]);
+      expect(r!.cleaned).toBe("ls | head; echo done");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

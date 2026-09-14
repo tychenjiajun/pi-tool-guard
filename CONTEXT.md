@@ -9,7 +9,8 @@ A trailing command in a bash pipeline that filters or transforms output (`head`,
 _Avoid_: filter, pipe command
 
 **Pipeline Stripping**:
-Removing trailing extractors from a bash command so the full output is available for further processing.
+Removing trailing **Extractors** from a bash command so the full output is available for further processing. "Trailing" is the end of the **whole** command: only the final `;`/`&&` statement's pipeline may lose extractors, and every earlier statement is preserved verbatim.
+_Avoid_: pipeline trimming, command rewriting
 
 **Fast Command**:
 A bash command that completes in under 10 seconds (configurable via `FAST_THRESHOLD_MS`).
@@ -51,6 +52,22 @@ _Avoid_: raw result
 The `piToolGuard.sourcePath` field pointing at the untruncated output file. It mirrors `details.fullOutputPath`, which guard always keeps so pre-contract reducers still find the full log.
 _Avoid_: fullOutputPath, temp path
 
+**Timing Split**:
+Illustrating the per-phase wall clock — `commandMs` (cleaned command execution) versus `extractorMs` (guard's extractor projection). Published as the optional `piToolGuard.timing` record and rendered only when the guard actually ran an extractor.
+_Avoid_: timing breakdown, duration chart
+
+**Guard Receipt**:
+The SoL-Pi-style themed block that replaces pi's single `Took <total>` line: a `🛡 pi-tool-guard · <pipeline>` title, an optional `Context saved · …` line from the **Projection Stats**, and the **Timing Split** bar. Rendered by `tui.ts` only for a non-**No-op Projection**.
+_Avoid_: timing illustration, toast
+
+**Projection Stats**:
+Before/after line and byte counts of a projection (`piToolGuard.projection`), measured only for inline (non-truncated) commands. Powers the receipt's "Context saved" line.
+_Avoid_: savings, reduction metrics
+
+**No-op Projection**:
+A **Projection Applied** whose content is identical (ignoring trailing whitespace) to the cleaned command's own output. The guard still stamps the **Guard Contract** but shows no **Notice** and no **Guard Receipt**, because it changed nothing the user would see.
+_Avoid_: empty filter, redundant projection
+
 ## Relationships
 
 - A **Pipeline** contains one or more commands, with optional **Extractors** at the end
@@ -58,6 +75,9 @@ _Avoid_: fullOutputPath, temp path
 - **Slow Commands** return results as-is with an **LLM Notice**
 - **Truncation** is independent of speed — a fast command can be truncated, a slow command may not be
 - The **Guard Contract** is stamped only when extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too
+- A **Timing Split** rides on the **Guard Contract**; it is rendered only when `extractorMs > 0` (a projection actually ran), so slow/full-output commands keep pi's plain `Took` line
+- A **Guard Receipt** bundles the **Timing Split** with **Projection Stats**; it replaces pi's `Took` line only when the guard actually projected a change
+- A **No-op Projection** is a **Projection Applied** that leaves the output unchanged, so guard suppresses both its **Notice** and its **Guard Receipt** while still publishing the contract
 
 ## Example dialogue
 

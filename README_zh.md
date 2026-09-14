@@ -39,8 +39,8 @@ pi install npm:pi-tool-guard
 
 | 场景 | UI 通知 | LLM 响应 |
 |---|---|---|
-| 快速命令（< 10秒），已截断 | `Filtered via \`head -5\`` | 仅返回过滤后的结果 |
-| 快速命令（< 10秒），未截断 | `Filtered via \`head -5\`` | 仅返回过滤后的结果 |
+| 快速命令（< 10秒），已截断 | `Filtered via \`head -5\` —— 大输出从临时文件管道过滤` | 仅返回过滤后的结果 |
+| 快速命令（< 10秒），未截断 | `Filtered via \`head -5\` —— 完整输出足够小，可直接管道` | 仅返回过滤后的结果 |
 | 慢速命令（无论是否截断） | `The full output is above...` | 结果 + `This is a slow command. Avoid re-running...` |
 
 > **通知格式**: UI 通知会显示完整的原始命令和提取的管道。示例：`Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.`
@@ -52,6 +52,18 @@ pi install npm:pi-tool-guard
 **检测的提取器：** `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `less`, `more`, `column`, `jq`, `yq`, `tr`
 
 所有尾部提取器都会被剥离：`npm test | grep FAIL | head -5` → 剥离 `grep FAIL | head -5`
+
+**耗时拆分：** pi 内置渲染器只打印一行不透明的 `Took <总耗时>`。当 guard 运行了被剥离的提取器（总耗时因此包含 guard 的投影开销）时，该行会被替换为 SoL-Pi 风格的收据：
+
+```
+🛡 pi-tool-guard · grep FAIL | head -5
+   Context saved · 1,234 → 20 lines · 98% smaller · 19 KiB saved
+   Took 6.5s  ██████████████░░░░  cmd 5.0s · filter 1.5s
+```
+
+进度条按比例绘制——accent `█` 表示清洗后的命令，warning `░` 表示 guard 的提取器。慢速命令不运行提取器，因此保留原有行。
+
+**无声空操作：** 当应用提取器后输出没有任何变化时（例如对 2 行结果执行 `tail -20`），guard 不显示 UI 通知也不渲染收据——保留 pi 原始的 `Took` 行。只有投影确实改变内容时才提示。
 
 ---
 
@@ -86,6 +98,18 @@ interface PiToolGuardDetails {
   removedPipeline: string;   // 例如 "tail -20"
   outcome: "projection-applied" | "full-output";
   sourcePath?: string;       // Pi 生成时，未截断输出的路径
+  timing?: {                 // guard 生效时的分阶段墙钟耗时
+    commandMs: number;       // 清洗后命令的执行耗时
+    extractorMs: number;     // guard 的提取器投影耗时（未运行则为 0）
+    totalMs: number;         // commandMs + extractorMs
+  };
+  projection?: {             // 可测量时的投影前后大小
+    inputLines: number;
+    inputBytes: number;
+    outputLines: number;
+    outputBytes: number;
+  };
+  noop?: boolean;            // 投影未改变输出
 }
 ```
 

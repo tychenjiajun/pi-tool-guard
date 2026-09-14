@@ -36,9 +36,13 @@ export interface StripResult {
 }
 
 /**
- * Parse a bash command, find trailing extractor commands in pipelines,
- * strip them, and return the cleaned command + pipeline segments.
- * Returns undefined if nothing was changed.
+ * Parse a bash command, find trailing extractor commands in the final
+ * statement's pipeline, strip them, and return the cleaned command + removed
+ * pipeline segments. Returns undefined if nothing was changed.
+ *
+ * "Trailing" means the end of the whole command: an extractor in an earlier
+ * `;`/`&&` statement is left alone, and every statement before the stripped
+ * pipeline is preserved verbatim in `cleaned`.
  */
 export function stripTrailingExtractors(command: string): StripResult | undefined {
   let ast;
@@ -48,7 +52,10 @@ export function stripTrailingExtractors(command: string): StripResult | undefine
     return undefined;
   }
 
-  const stmt = ast.commands[0];
+  // Only the LAST statement can end the command. Looking at `commands[0]`
+  // would treat an extractor in the middle of `a | head; b` as trailing and
+  // then chop off every later statement when rebuilding `cleaned`.
+  const stmt = ast.commands[ast.commands.length - 1];
   if (!stmt) return undefined;
 
   // Walk into AndOr → Pipeline → commands
