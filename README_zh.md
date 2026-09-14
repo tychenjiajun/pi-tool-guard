@@ -57,17 +57,43 @@ pi install npm:pi-tool-guard
 
 ## 架构
 
-两个功能都使用 `prepareArguments` 来覆盖内置工具——这是 pi 扩展进行参数纠正的最简洁模式：
+别名规范化使用 `prepareArguments` 来覆盖 `edit`/`write`/`read` 工具——这是 pi 扩展进行参数纠正的最简洁模式：
 
 - **edit/write/read**: `createXxxToolDefinition(cwd)` + `prepareArguments` 在 schema 验证前规范化别名
-- **bash**: `createBashToolDefinition(cwd)` + 自定义 `execute` 覆盖：
-  1. `prepareArguments` 使用 [unbash](https://github.com/nicolo-ribaudo/unbash) 解析命令，剥离尾部提取器
-  2. `execute` 通过原始内置 execute 运行剥离后的命令
-  3. 如果快速（< 10秒）且已截断 → 通过 `pi.exec` 在完整输出文件上运行提取器
-  4. 如果快速（< 10秒）且未截断 → 通过 `pi.exec` 将结果通过管道传递给提取器
-  5. 如果慢速（无论是否截断）→ 原样返回结果并附带通知
+
+Bash 使用自定义 `execute` 覆盖：
+
+1. `execute` 使用 [unbash](https://github.com/nicolo-ribaudo/unbash) 解析命令，剥离尾部提取器。剥离发生在这里（而非 `prepareArguments`），以便 `tool_result.input.command` 保留用户编写的原始命令。
+2. 剥离后的命令通过原始内置 execute 运行
+3. 如果快速（< 10秒）且已截断 → 通过 `pi.exec` 在完整输出文件上运行提取器
+4. 如果快速（< 10秒）且未截断 → 通过 `pi.exec` 将结果通过管道传递给提取器
+5. 如果慢速（无论是否截断）→ 原样返回结果并附带通知
 
 无错误恢复，无会话扫描。
+
+---
+
+## 互操作：`details.piToolGuard`
+
+当 guard 剥离提取器时，会在 `details.piToolGuard` 上打上版本化记录，以便其他 `tool_result` 处理器——尤其是 [SoL-Pi](https://github.com/earendil-works/soL-pi) 的证据保留 reducer——判断可见内容的真实含义：
+
+```ts
+interface PiToolGuardDetails {
+  version: 1;
+  originalCommand: string;   // 例如 "npm test | tail -20"
+  cleanedCommand: string;    // 例如 "npm test"
+  removed: string[];         // 例如 ["tail"]
+  removedPipeline: string;   // 例如 "tail -20"
+  outcome: "projection-applied" | "full-output";
+  sourcePath?: string;       // Pi 生成时，未截断输出的路径
+}
+```
+
+- `outcome: "projection-applied"` — `content` 是用户的投影视图，作为回退应用。guard **保留** `details.fullOutputPath`/`truncation`（使 reducer 仍能归档完整日志），并将路径镜像为 `piToolGuard.sourcePath`。SoL-Pi 的 reducer 会读取 `fullOutputPath`，缩减完整日志，并用收据覆盖 guard 的投影。
+- `outcome: "full-output"` — `content` 是剥离后命令的完整输出，保留 `details.fullOutputPath`。
+- 未剥离提取器 → 不打记录；`details` 保持不变。
+
+该契约是增量式且版本化的。使用者必须通过 `readPiToolGuardDetails`（从 `contract.ts` 导出）解析，并在遇到未知版本时回退到内联内容。
 
 ## 开发
 

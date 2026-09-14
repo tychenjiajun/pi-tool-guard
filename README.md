@@ -57,17 +57,43 @@ All trailing extractors are stripped: `npm test | grep FAIL | head -5` → strip
 
 ## Architecture
 
-Both features use `prepareArguments` on overridden built-in tools — the cleanest pi extension pattern for argument correction:
+Alias normalization uses `prepareArguments` on the overridden `edit`/`write`/`read` tools — the cleanest pi extension pattern for argument correction:
 
 - **edit/write/read**: `createXxxToolDefinition(cwd)` + `prepareArguments` normalizes aliases before schema validation
-- **bash**: `createBashToolDefinition(cwd)` + custom `execute` override:
-  1. `prepareArguments` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash), strips trailing extractors
-  2. `execute` runs the stripped command via the original built-in execute
-  3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
-  4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
-  5. If slow (truncated or not) → returns result as-is with notice
+
+Bash runs a custom `execute` override:
+
+1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing extractors. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
+2. The cleaned command is run through the original built-in execute.
+3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
+4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
+5. If slow (truncated or not) → returns result as-is with notice
 
 No error recovery, no session scanning.
+
+---
+
+## Interop: `details.piToolGuard`
+
+When the guard strips extractors it stamps a versioned record on `details.piToolGuard` so other `tool_result` handlers — notably [SoL-Pi](https://github.com/earendil-works/soL-pi)'s evidence-preserving reducer — can tell what the visible content really is:
+
+```ts
+interface PiToolGuardDetails {
+  version: 1;
+  originalCommand: string;   // e.g. "npm test | tail -20"
+  cleanedCommand: string;    // e.g. "npm test"
+  removed: string[];         // e.g. ["tail"]
+  removedPipeline: string;   // e.g. "tail -20"
+  outcome: "projection-applied" | "full-output";
+  sourcePath?: string;       // untruncated output, when Pi produced one
+}
+```
+
+- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
+- `outcome: "full-output"` — `content` is the cleaned command's full output and `details.fullOutputPath` is kept.
+- No extractors stripped → no record; `details` is left untouched.
+
+The contract is additive and versioned. Consumers must parse with `readPiToolGuardDetails` (exported from `contract.ts`) and fall back to the inline content for unknown versions.
 
 ## Development
 

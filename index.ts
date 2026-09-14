@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  type BashToolInput,
   type EditToolInput,
   type ReadToolInput,
   type WriteToolInput,
@@ -14,7 +13,7 @@ import {
   normalizeWriteArgs,
   normalizeReadArgs,
 } from "./aliases.ts";
-import { executeBashGuarded, prepareBashArguments } from "./execute.ts";
+import { executeBashGuarded } from "./execute.ts";
 
 // ---------------------------------------------------------------------------
 // extension
@@ -56,16 +55,14 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
     });
 
     // ── Override bash ──────────────────────────────────────────────────
+    // Extractor stripping happens inside `execute` (not `prepareArguments`)
+    // so `tool_result.input.command` keeps the command the user wrote. See
+    // ./contract.ts for the details.piToolGuard record published downstream.
     const bashDef = createBashToolDefinition(ctx.cwd);
     const originalExecute = bashDef.execute;
 
     pi.registerTool({
       ...bashDef,
-      prepareArguments: (args: unknown): BashToolInput => {
-        if (!args || typeof args !== "object") return args as BashToolInput;
-        return prepareBashArguments(args as Record<string, unknown>) as unknown as BashToolInput;
-      },
-
       async execute(toolCallId, params, signal, onUpdate, execCtx) {
         return executeBashGuarded(
           { pi, ctx, originalExecute },

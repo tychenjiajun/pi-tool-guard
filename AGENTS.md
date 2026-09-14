@@ -23,11 +23,22 @@
 - `bash.ts` — Helper functions for running extractors and building notices
 - `pipeline.ts` — Bash command parsing and extractor stripping
 - `aliases.ts` — Argument normalization for edit/write/read
+- `contract.ts` — Versioned `details.piToolGuard` interop contract for downstream consumers (e.g. SoL-Pi's evidence-preserving reducer)
+
+## Interop Contract
+
+Bash extractor stripping happens in `execute` (not `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote. When extractors are stripped, the result stamps `details.piToolGuard` (see `contract.ts`):
+
+- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. `details.fullOutputPath`/`truncation` are **kept**, so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection with its receipt.
+- `outcome: "full-output"` — `content` is the cleaned command's full output; `details.fullOutputPath` is preserved.
+
+Consumers must parse via `readPiToolGuardDetails` and fall back to inline content for unknown versions.
 
 ## External References
 | Need | File |
 |------|------|
 | Domain glossary | `CONTEXT.md` |
+| Interop contract | `contract.ts` |
 | Pi extension docs | [pi docs](https://github.com/earendil-works/pi-coding-agent/docs) |
 
 ## Commit Attribution

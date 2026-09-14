@@ -9,6 +9,12 @@ import {
   runExtractorOnFile,
   runExtractorOnText,
 } from "./bash.ts";
+import {
+  PI_TOOL_GUARD_CONTRACT_VERSION,
+  PI_TOOL_GUARD_DETAILS_KEY,
+  type PiToolGuardDetails,
+  type PiToolGuardOutcome,
+} from "./contract.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,16 +22,66 @@ import {
 
 export type ToolResult = AgentToolResult<BashToolDetails | undefined>;
 
+export type GuardedBashToolDetails = BashToolDetails & {
+  [PI_TOOL_GUARD_DETAILS_KEY]?: PiToolGuardDetails;
+};
+
 export interface ExecuteContext {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
   originalExecute: (
     toolCallId: string,
-    params: unknown,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    params: any,
     signal: AbortSignal | undefined,
-    onUpdate: ((update: unknown) => void) | undefined,
-    execCtx: unknown,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onUpdate: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    execCtx: any,
   ) => Promise<ToolResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Guard details
+// ---------------------------------------------------------------------------
+
+/**
+ * Attach the versioned guard record to the result's details.
+ *
+ * `details` is preserved as-is. In particular, on `projection-applied` the
+ * untruncated `fullOutputPath`/`truncation` are deliberately KEPT: the visible
+ * `content` is the user's projection, but a downstream reducer (e.g. SoL-Pi's
+ * evidence-preserving reducer) reads `fullOutputPath` to archive and reduce the
+ * exact full log. Guard's projection is the fallback for when no reducer acts.
+ */
+function withGuardDetails(
+  result: ToolResult,
+  guard: PiToolGuardDetails,
+): ToolResult {
+  const details = { ...((result.details ?? {}) as Record<string, unknown>) };
+  details[PI_TOOL_GUARD_DETAILS_KEY] = guard;
+  return {
+    ...result,
+    details: details as BashToolDetails,
+  };
+}
+
+function guardRecord(
+  originalCommand: string,
+  cleanedCommand: string,
+  stripped: { removedNames: string[]; removedPipeline: string },
+  outcome: PiToolGuardOutcome,
+  sourcePath: string | undefined,
+): PiToolGuardDetails {
+  return {
+    version: PI_TOOL_GUARD_CONTRACT_VERSION,
+    originalCommand,
+    cleanedCommand,
+    removed: stripped.removedNames,
+    removedPipeline: stripped.removedPipeline,
+    outcome,
+    ...(sourcePath ? { sourcePath } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -37,37 +93,41 @@ export async function executeBashGuarded(
   toolCallId: string,
   params: unknown,
   signal: AbortSignal | undefined,
-  onUpdate: ((update: unknown) => void) | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onUpdate: any,
   execCtx: unknown,
 ): Promise<ToolResult> {
   const input = params as Record<string, unknown>;
-  const removedNamesRaw = input._piToolGuardRemoved;
-  const removedPipeline = input._piToolGuardPipeline as string | undefined;
-  const originalCommand = input._piToolGuardOriginalCommand as string | undefined;
-
-  // No extractors — run normally
-  if (!Array.isArray(removedNamesRaw) || removedNamesRaw.length === 0 || !removedPipeline || !originalCommand) {
+  const originalCommand = typeof input.command === "string" ? input.command : undefined;
+  if (!originalCommand) {
     return ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
   }
 
-  // Clean transient fields before running
-  delete input._piToolGuardRemoved;
-  delete input._piToolGuardPipeline;
-  delete input._piToolGuardOriginalCommand;
+  const stripped = stripTrailingExtractors(originalCommand);
+  if (!stripped) {
+    return ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
+  }
 
-  // Run the stripped command
+  // Execute the cleaned command through a copy, leaving the caller's args
+  // untouched. `tool_result.input.command` (and Pi's tool-call display) then
+  // keeps the command the user actually wrote, which is what the SoL-Pi
+  // evidence-preserving reducer hashes and cites in its receipt.
+  const cleanedParams = { ...input, command: stripped.cleaned };
+
   const start = Date.now();
-  let result;
+  let result: ToolResult;
   try {
-    result = await ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
+    result = await ctx.originalExecute(toolCallId, cleanedParams, signal, onUpdate, execCtx);
   } catch (err) {
-    // On error: check if output was saved to file, run extractor on it
+    // On error: check if output was saved to file, run extractor on it.
+    // A thrown error cannot carry `details`, so this path intentionally does
+    // not publish the guard contract.
     const errText = err instanceof Error ? err.message : String(err);
     const fullPath = extractFullOutputPath(errText);
     if (fullPath) {
-      const extracted = await runExtractorOnFile(ctx.pi, fullPath, removedPipeline);
+      const extracted = await runExtractorOnFile(ctx.pi, fullPath, stripped.removedPipeline);
       if (extracted !== undefined) {
-        const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
+        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
         ctx.ctx.ui.notify(uiNotice, "info");
         throw new Error(extracted);
       }
@@ -76,64 +136,73 @@ export async function executeBashGuarded(
   }
 
   const elapsed = Date.now() - start;
-  const details = result.details as BashToolDetails | undefined;
-  const isTruncated = !!details?.fullOutputPath;
+  const resultDetails = result.details as BashToolDetails | undefined;
+  const fullOutputPath = resultDetails?.fullOutputPath;
 
   // Case 1: Fast command, truncated → run extractor on the full output file
-  if (elapsed < FAST_THRESHOLD_MS && isTruncated) {
-    const extracted = await runExtractorOnFile(ctx.pi, details!.fullOutputPath!, removedPipeline);
+  if (elapsed < FAST_THRESHOLD_MS && fullOutputPath) {
+    const extracted = await runExtractorOnFile(ctx.pi, fullOutputPath, stripped.removedPipeline);
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
+      const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
       ctx.ctx.ui.notify(uiNotice, "info");
-      return {
-        content: [{ type: "text" as const, text: extracted }],
-        details: result.details,
-      };
+      return withGuardDetails(
+        {
+          content: [{ type: "text" as const, text: extracted }],
+          details: result.details,
+        },
+        guardRecord(
+          originalCommand,
+          stripped.cleaned,
+          stripped,
+          "projection-applied",
+          fullOutputPath,
+        ),
+      );
     }
   }
 
   // Case 2: Fast command, not truncated → pipe result through extractor
-  if (elapsed < FAST_THRESHOLD_MS && !isTruncated) {
+  if (elapsed < FAST_THRESHOLD_MS && !fullOutputPath) {
     const resultText = result.content
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
       .map((c) => c.text)
       .join("\n");
 
-    const extracted = await runExtractorOnText(ctx.pi, resultText, removedPipeline);
+    const extracted = await runExtractorOnText(ctx.pi, resultText, stripped.removedPipeline);
     if (extracted !== undefined) {
-      const uiNotice = buildNotice(removedPipeline, originalCommand, "fast");
+      const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
       ctx.ctx.ui.notify(uiNotice, "info");
-      return {
-        content: [{ type: "text" as const, text: extracted }],
-        details: result.details,
-      };
+      return withGuardDetails(
+        {
+          content: [{ type: "text" as const, text: extracted }],
+          details: result.details,
+        },
+        guardRecord(
+          originalCommand,
+          stripped.cleaned,
+          stripped,
+          "projection-applied",
+          undefined,
+        ),
+      );
     }
   }
 
   // Case 3: Slow command (truncated or not) → return result with LLM notice
-  const uiNotice = buildNotice(removedPipeline, originalCommand, "slow");
+  const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
   ctx.ctx.ui.notify(uiNotice, "info");
   const llmNotice = `This is a slow command. Avoid re-running; prefer reading from the full output path if available.`;
-  return {
-    content: [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
-    details: result.details,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// prepareArguments logic (extracted for testability)
-// ---------------------------------------------------------------------------
-
-export function prepareBashArguments(input: Record<string, unknown>): Record<string, unknown> {
-  if (typeof input.command !== "string") return input;
-
-  const stripped = stripTrailingExtractors(input.command);
-  if (stripped) {
-    input._piToolGuardOriginalCommand = input.command;
-    input.command = stripped.cleaned;
-    input._piToolGuardRemoved = stripped.removedNames;
-    input._piToolGuardPipeline = stripped.removedPipeline;
-  }
-
-  return input;
+  return withGuardDetails(
+    {
+      content: [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
+      details: result.details,
+    },
+    guardRecord(
+      originalCommand,
+      stripped.cleaned,
+      stripped,
+      "full-output",
+      fullOutputPath,
+    ),
+  );
 }

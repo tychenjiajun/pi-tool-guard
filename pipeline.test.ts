@@ -309,6 +309,14 @@ describe("stripTrailingExtractors", () => {
       expect(r!.removedNames).toEqual(["tail"]);
       expect(r!.cleaned).toBe("cd /path && npm test 2>&1");
     });
+
+    it("multiple && with head pipelines (TOP CPU/MEM case)", () => {
+      const cmd = 'echo "=== TOP CPU ===" && ps aux --sort=-%cpu 2>/dev/null | head -15 && echo "=== TOP MEM ===" && ps aux --sort=-%mem 2>/dev/null | head -10';
+      const r = stripTrailingExtractors(cmd);
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe('echo "=== TOP CPU ===" && ps aux --sort=-%cpu 2>/dev/null | head -15 && echo "=== TOP MEM ===" && ps aux --sort=-%mem 2>/dev/null');
+    });
   });
 });
 

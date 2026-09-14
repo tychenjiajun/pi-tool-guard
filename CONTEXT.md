@@ -35,12 +35,29 @@ _Avoid_: hint, message
 Converting incorrect or alias field names to the canonical names expected by the tool schema.
 _Avoid_: field mapping, alias resolution
 
+**Guard Contract**:
+The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output.
+_Avoid_: metadata blob, guard flag
+
+**Projection Applied**:
+A Guard Contract outcome meaning `content` is the result of re-running the stripped extractor pipeline — the user's requested view, applied as a fallback. `details.fullOutputPath`/`truncation` are kept so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection.
+_Avoid_: filtered result, reduced
+
+**Full Output**:
+A Guard Contract outcome meaning `content` is the cleaned command's full (possibly truncated) output — the extractor was not applied (slow command). `details.fullOutputPath` is preserved.
+_Avoid_: raw result
+
+**Source Path**:
+The `piToolGuard.sourcePath` field pointing at the untruncated output file. It mirrors `details.fullOutputPath`, which guard always keeps so pre-contract reducers still find the full log.
+_Avoid_: fullOutputPath, temp path
+
 ## Relationships
 
 - A **Pipeline** contains one or more commands, with optional **Extractors** at the end
 - **Fast Commands** have extractors piped through them (or run on `fullOutputPath` if truncated)
 - **Slow Commands** return results as-is with an **LLM Notice**
 - **Truncation** is independent of speed — a fast command can be truncated, a slow command may not be
+- The **Guard Contract** is stamped only when extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too
 
 ## Example dialogue
 
@@ -48,7 +65,10 @@ _Avoid_: field mapping, alias resolution
 > **Domain expert:** "It strips `head`, runs `ls`, then pipes the result through `head`. The user sees a UI notice, but the LLM gets the filtered result only."
 >
 > **Dev:** "What about `npm test | tail -10` if it takes 30 seconds?"
-> **Domain expert:** "It's a slow command. The guard strips `tail`, runs `npm test`, returns the full result to the LLM with a 'slow command' hint, and shows a UI notice."
+> **Domain expert:** "It's a slow command. The guard strips `tail`, runs `npm test`, returns the full result to the LLM with a 'slow command' hint, shows a UI notice, and stamps the **Guard Contract** with outcome **Full Output**. A downstream reducer can then safely archive the full log via `fullOutputPath`."
+>
+> **Dev:** "And if it finishes in 2 seconds?"
+> **Domain expert:** "**Projection Applied**: the guard runs `tail` on the result as a fallback, but keeps `fullOutputPath`, so a reducer that understands the contract (or just reads **Source Path**) can override guard's projection with an evidence-checked receipt for the full log."
 
 ## Flagged ambiguities
 
