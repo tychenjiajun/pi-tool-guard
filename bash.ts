@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -10,6 +10,23 @@ import { extractFullOutputPath } from "./pipeline.ts";
 // ---------------------------------------------------------------------------
 
 export const FAST_THRESHOLD_MS = 10_000;
+
+/** pi renders an empty command result as this literal string. */
+export const EMPTY_OUTPUT_PLACEHOLDER = "(no output)";
+
+/** Full-output temp files older than this are swept. */
+export const FULL_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Filename prefix for guard-persisted full outputs.
+ *
+ * It intentionally starts with `pi-bash-` so downstream consumers that only
+ * trust pi's own temp artifacts (notably SoL-Pi's evidence-preserving reducer,
+ * whose `safePiBashTempPath` requires `/^pi-bash-[^/\\]+\.log$/` directly in
+ * the OS temp dir) will read the guard's full log. The `guard-` segment keeps
+ * it distinguishable from pi's own files so the guard never sweeps those.
+ */
+export const FULL_OUTPUT_PREFIX = "pi-bash-guard-";
 
 export type NoticeMode = "fast" | "fast-file" | "slow";
 
@@ -45,7 +62,10 @@ export function buildSlowReadbackNotice(originalCommand: string, sourcePath?: st
   }
   return [
     header,
-    `The full, unextracted output was saved to: ${sourcePath}`,
+    // The literal `Full output: <path>` form mirrors pi's truncation banner
+    // and the error path; downstream reducers (SoL-Pi's EPR) regex-scan for it
+    // when `details.fullOutputPath` is unavailable.
+    `Full output: ${sourcePath}`,
     `To see more later, read that file on demand — e.g. the \`read\` tool with offset/limit, or \`sed -n 'START,ENDp' "${sourcePath}"\` — instead of re-running the command.`,
   ].join("\n");
 }
@@ -60,55 +80,101 @@ export function isProjectionNoop(projected: string, original: string): boolean {
 }
 
 /**
+ * Result of running an extractor pipeline. `code` carries the pipeline's real
+ * exit code, which is propagated so a non-zero exit matches what pi's native
+ * `cmd | extractor` pipeline would have done (no `pipefail`, so the code is the
+ * extractor's own).
+ */
+export interface ExtractorRunResult {
+  text: string;
+  code: number;
+}
+
+/**
  * Run an extractor pipeline on a file (e.g. the full output temp file).
  *
- * F2: accepts exit code 0 AND 1 (grep exits 1 on no match) and allows empty
- * stdout. Returns the filtered text (possibly ""), or undefined on exception
- * or exit code >= 2.
+ * Returns `{ text, code }` for ANY exit code from `pi.exec` — callers decide
+ * what to do with non-zero codes. Returns `undefined` only when `pi.exec`
+ * itself throws.
  */
 export async function runExtractorOnFile(
   pi: ExtensionAPI,
   filePath: string,
   pipeline: string,
-): Promise<string | undefined> {
+): Promise<ExtractorRunResult | undefined> {
   try {
     // The path travels as an argv element ($1), never spliced into the script,
     // so spaces/quotes/`$` in it cannot be re-parsed by bash.
     const result = await pi.exec("bash", ["-c", `cat -- "$1" | ${pipeline}`, "bash", filePath]);
-    if (result.code === 0 || result.code === 1) {
-      return result.stdout.trimEnd();
-    }
+    return { text: result.stdout.trimEnd(), code: result.code ?? 0 };
   } catch {
     // Bail silently
+    return undefined;
   }
-  return undefined;
 }
 
 /**
  * Run an extractor pipeline on inline text via printf + pipe.
  *
- * F2: accepts exit code 0 AND 1 (grep exits 1 on no match) and allows empty
- * stdout. Returns the filtered text (possibly ""), or undefined on exception
- * or exit code >= 2.
+ * Returns `{ text, code }` for ANY exit code from `pi.exec` — callers decide
+ * what to do with non-zero codes. Returns `undefined` only when `pi.exec`
+ * itself throws.
  */
 export async function runExtractorOnText(
   pi: ExtensionAPI,
   text: string,
   pipeline: string,
-): Promise<string | undefined> {
+): Promise<ExtractorRunResult | undefined> {
   try {
     // `text` is passed as $1, not spliced into the script. Splicing
     // `JSON.stringify(text)` let bash collapse real newlines into the two
     // characters `\n` (breaking every line-based extractor) and let `$(...)`
     // / backticks in command output expand.
     const result = await pi.exec("bash", ["-c", `printf '%s' "$1" | ${pipeline}`, "bash", text]);
-    if (result.code === 0 || result.code === 1) {
-      return result.stdout.trimEnd();
-    }
+    return { text: result.stdout.trimEnd(), code: result.code ?? 0 };
   } catch {
     // Bail silently
+    return undefined;
   }
-  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// F6: temp-file cleanup
+// ---------------------------------------------------------------------------
+
+const FULL_OUTPUT_FILENAME_RE = /^pi-bash-guard-.*\.log$/;
+
+/**
+ * Best-effort removal of stale full-output temp files. Deletes files in `dir`
+ * whose name matches `/^pi-bash-guard-.*\.log$/` and whose `mtimeMs` is older
+ * than `maxAgeMs`. Never throws; returns the count of files removed.
+ */
+export function sweepStaleFullOutputs(
+  dir: string = tmpdir(),
+  maxAgeMs: number = FULL_OUTPUT_TTL_MS,
+  now: number = Date.now(),
+): number {
+  let removed = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: false }) as string[];
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    if (!FULL_OUTPUT_FILENAME_RE.test(name)) continue;
+    const filePath = join(dir, name);
+    try {
+      const st = statSync(filePath);
+      if (now - st.mtimeMs > maxAgeMs) {
+        rmSync(filePath);
+        removed++;
+      }
+    } catch {
+      // best-effort: skip this entry
+    }
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +188,12 @@ export async function runExtractorOnText(
  */
 export function persistFullOutput(text: string): string | undefined {
   try {
-    const path = join(tmpdir(), `pi-tool-guard-${randomBytes(8).toString("hex")}.log`);
+    sweepStaleFullOutputs();
+  } catch {
+    // sweepStaleFullOutputs never throws, but be defensive
+  }
+  try {
+    const path = join(tmpdir(), `${FULL_OUTPUT_PREFIX}${randomBytes(8).toString("hex")}.log`);
     writeFileSync(path, text, "utf-8");
     return path;
   } catch {

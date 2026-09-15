@@ -20,8 +20,12 @@ _Avoid_: quiet prefix, empty prefix
 A bash command that completes in under 10 seconds (configurable via `FAST_THRESHOLD_MS`).
 _Avoid_: quick command, short command
 
+**Fast-Path Projection**:
+For a **Fast Command** ending in a stripped view extractor, guard executes the *cleaned* command and re-applies the extractor to pi's formatted result instead of running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs. An empty inline projection renders as `(no output)`, matching pi's own empty-result rendering.
+_Avoid_: exact-shell fidelity, stderr separation
+
 **Slow Command**:
-A bash command that takes 10 seconds or more to complete. The guard persists the full output to a temp file (even below pi's truncation limit), runs the stripped view extractor, and returns the projected view + full-output pointer with an **LLM Notice**.
+A bash command that takes 10 seconds or more to complete. The guard persists the full output to a temp file (even below pi's truncation limit), runs the stripped view extractor, and returns the projected view + full-output pointer with an **LLM Notice**. The persisted log is a `pi-bash-guard-<hex>.log` in the OS temp dir (named so downstream consumers that trust pi's `pi-bash-*.log` artifacts will read it); logs older than `FULL_OUTPUT_TTL_MS` (24h) are swept best-effort on subsequent persists. When pi did not truncate, the guard publishes this path as `details.fullOutputPath` so a reducer can archive the full log. If persisting fails (filesystem error) and pi did not truncate, the guard falls back to returning the full output (outcome `full-output`) instead of a projection.
 _Avoid_: long command, heavy command
 
 **Truncation**:
@@ -53,7 +57,7 @@ A Guard Contract outcome meaning `content` is the cleaned command's full (possib
 _Avoid_: raw result
 
 **Source Path**:
-The `piToolGuard.sourcePath` field pointing at the untruncated output file. It mirrors `details.fullOutputPath`, which guard always keeps so pre-contract reducers still find the full log.
+The `piToolGuard.sourcePath` field pointing at the untruncated output file. It mirrors `details.fullOutputPath`, which guard always keeps — and, for a slow command pi did not truncate, sets to guard's own persisted `pi-bash-guard-*.log` — so pre-contract reducers still find the full log.
 _Avoid_: fullOutputPath, temp path
 
 **Full-Output Readback**:
@@ -61,7 +65,7 @@ The **LLM Notice** appended to a **Slow Command**'s projected result. It inlines
 _Avoid_: cache hit, replay, memoization
 
 **Error (Non-zero Exit)**:
-When the cleaned command exits non-zero, pi's bash tool throws. The guard recovers the output and `Full output: <path>` pointer from that error, applies the stripped view extractor to the available full output, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. No Guard Contract is published on this path.
+When the cleaned command exits non-zero, pi's bash tool throws. The guard recovers the output and `Full output: <path>` pointer from that error, applies the stripped view extractor to the available full output, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. The same path handles a re-applied extractor that itself exits non-zero (e.g. `cmd | grep no-match`); its exit code is propagated to match pi's native `cmd | extractor` behavior. No Guard Contract is published on this path.
 _Avoid_: error projection, exit code recovery
 
 **Timing Split**:

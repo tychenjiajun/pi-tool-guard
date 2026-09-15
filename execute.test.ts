@@ -1,5 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const mockPersistFullOutput = vi.hoisted(() => vi.fn());
+
+vi.mock("./bash.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./bash.ts")>();
+  return {
+    ...actual,
+    persistFullOutput: mockPersistFullOutput,
+  };
+});
+
 import {
   executeBashGuarded,
   rethrowGuardedError,
@@ -7,10 +18,18 @@ import {
   type ToolResult,
 } from "./execute.ts";
 import { readPiToolGuardDetails } from "./contract.ts";
+import { persistFullOutput, EMPTY_OUTPUT_PLACEHOLDER, FAST_THRESHOLD_MS } from "./bash.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+beforeEach(() => {
+  // Default: persistFullOutput returns undefined. Tests that need real
+  // filesystem behavior can override this mock inline.
+  mockPersistFullOutput.mockReset();
+  mockPersistFullOutput.mockReturnValue(undefined);
+});
 
 function makeContext() {
   const mockPi = { exec: vi.fn() } as unknown as ExtensionAPI;
@@ -101,6 +120,38 @@ describe("rethrowGuardedError", () => {
     ).rejects.toThrow(/error text[\s\S]*Command exited with code 1/);
     // No notification when extractor fails
     expect(mockCtx.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original exit code when the re-run extractor also fails", async () => {
+    const { mockPi, ctx } = makeContext();
+    const err = new Error("body text\n\nCommand exited with code 2");
+
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 1,
+      stdout: "partial body",
+    });
+
+    await expect(
+      rethrowGuardedError(ctx, stripped, "npm test | tail -5", err),
+    ).rejects.toThrow(/partial body[\s\S]*Command exited with code 2/);
+  });
+
+  it("uses the slow notice mode when the failing command was slow", async () => {
+    const { mockPi, mockCtx, ctx } = makeContext();
+    const err = new Error("out\n\nCommand exited with code 1");
+
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "projected",
+    });
+
+    await expect(
+      rethrowGuardedError(ctx, stripped, "npm test | tail -5", err, FAST_THRESHOLD_MS + 1),
+    ).rejects.toThrow(/projected/);
+    expect(mockCtx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("do NOT re-run"),
+      "info",
+    );
   });
 });
 
@@ -313,4 +364,263 @@ describe("executeBashGuarded background operator", () => {
     expect(mockCtx.ui.notify).not.toHaveBeenCalled();
     expect(readPiToolGuardDetails(result.details)).toBeUndefined();
   });
+});
+
+// -------------------------------------------------------------------------
+// #1: extractor exit-code fidelity
+// -------------------------------------------------------------------------
+
+describe("executeBashGuarded extractor exit-code fidelity", () => {
+  it("throws when the extractor pipeline exits non-zero (code 2)", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "line1\nline2\nline3" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 2,
+      stdout: "",
+    });
+
+    await expect(
+      executeBashGuarded(
+        ctx, "c1", { command: "ls | head -2" },
+        new AbortController().signal, () => {}, {},
+      ),
+    ).rejects.toThrow(/Command exited with code 2/);
+  });
+
+  it("includes the extractor stdout body in the thrown error", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "line1\nline2" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 3,
+      stdout: "partial output",
+    });
+
+    await expect(
+      executeBashGuarded(
+        ctx, "c1", { command: "ls | head -2" },
+        new AbortController().signal, () => {}, {},
+      ),
+    ).rejects.toThrow(/partial output[\s\S]*Command exited with code 3/);
+  });
+
+  it("throws with the (no output) placeholder when extractor stdout is empty", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "line1" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 2,
+      stdout: "",
+    });
+
+    await expect(
+      executeBashGuarded(
+        ctx, "c1", { command: "ls | head -2" },
+        new AbortController().signal, () => {}, {},
+      ),
+    ).rejects.toThrow(/\(no output\)[\s\S]*Command exited with code 2/);
+  });
+
+  it("throws with full-output path when source is a file", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "truncated..." }],
+      details: { fullOutputPath: "/tmp/pi-bash-xyz.log" },
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 2,
+      stdout: "",
+    });
+
+    await expect(
+      executeBashGuarded(
+        ctx, "c1", { command: "npm test | tail -5" },
+        new AbortController().signal, () => {}, {},
+      ),
+    ).rejects.toThrow(/Command exited with code 2.*Full output: \/tmp\/pi-bash-xyz\.log/);
+  });
+
+  it("throws for exit code 1 (grep no match), matching pi's pipeline exit", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "line1\nline2" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 1,
+      stdout: "",
+    });
+
+    await expect(
+      executeBashGuarded(
+        ctx, "c1", { command: "ls | grep nomatch" },
+        new AbortController().signal, () => {}, {},
+      ),
+    ).rejects.toThrow(/Command exited with code 1/);
+  });
+});
+
+// -------------------------------------------------------------------------
+// #3: empty-output fidelity for inline projections
+// -------------------------------------------------------------------------
+
+describe("executeBashGuarded empty-output fidelity", () => {
+  it("keeps (no output) placeholder when inline source is empty and projection yields empty", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "(no output)" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "true | head -1" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    expect(result.content[0]).toEqual({ type: "text", text: "(no output)" });
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("projection-applied");
+    // The placeholder projection is a noop (input === output)
+    expect(guard?.noop).toBe(true);
+  });
+
+  it("does NOT keep (no output) when the projection produces real output", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "(no output)" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "real output",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "true | head -1" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    expect(result.content[0]).toEqual({ type: "text", text: "real output" });
+  });
+
+  it("does NOT keep (no output) when the inline source has real output", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "actual output" }],
+      details: undefined,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "echo actual | head -0" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // The projection came back empty but the source was real, so we show the
+    // empty string — not the placeholder.
+    expect(result.content[0]).toEqual({ type: "text", text: "" });
+  });
+});
+
+// -------------------------------------------------------------------------
+// #2: persist-failure fallback
+// -------------------------------------------------------------------------
+
+describe("executeBashGuarded persist-failure fallback", () => {
+  it("returns full output when slow and no source path available", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+
+    // Simulate a slow command by delaying past FAST_THRESHOLD_MS.
+    mockOriginalExecute.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                content: [{ type: "text", text: "line1\nline2\nline3" }],
+                details: undefined,
+              }),
+            FAST_THRESHOLD_MS + 100,
+          ),
+        ),
+    );
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "line1\nline2",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "slowcmd | head -2" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // Without persist (persistFullOutput fails → undefined), the projection is
+    // unsafe (slow + no sourcePath → canProject false), so we fall back to
+    // full output with an LLM notice.
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("full-output");
+    expect(guard?.slow).toBe(true);
+    // The LLM notice is appended to the original output.
+    const last = result.content[result.content.length - 1];
+    if (last.type !== "text") throw new Error("expected a text content block");
+    expect(last.text).toContain("slow command");
+  }, 30000);
+
+  it("applies the projection when a slow command persists its full output", async () => {
+    const { mockPi, mockOriginalExecute, mockCtx, ctx } = makeContext();
+    mockPersistFullOutput.mockReturnValueOnce("/tmp/pi-bash-guard-deadbeef.log");
+
+    mockOriginalExecute.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                content: [{ type: "text", text: "a\nb\nc" }],
+                details: undefined,
+              }),
+            FAST_THRESHOLD_MS + 100,
+          ),
+        ),
+    );
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "a\nb",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "slowcmd | head -2" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("projection-applied");
+    expect(guard?.slow).toBe(true);
+    expect(guard?.sourcePath).toBe("/tmp/pi-bash-guard-deadbeef.log");
+    // The guard's own persisted log is published as `details.fullOutputPath`
+    // (pi did not truncate), so SoL-Pi's EPR can read the exact full log.
+    expect((result.details as { fullOutputPath?: string }).fullOutputPath).toBe(
+      "/tmp/pi-bash-guard-deadbeef.log",
+    );
+    const first = result.content[0];
+    if (first.type !== "text") throw new Error("expected a text content block");
+    expect(first.text).toContain("a\nb");
+    // The LLM notice inlines the reducer-friendly `Full output: <path>` marker.
+    expect(first.text).toContain("Full output: /tmp/pi-bash-guard-deadbeef.log");
+    expect(mockCtx.ui.notify).toHaveBeenCalled();
+  }, 30000);
 });

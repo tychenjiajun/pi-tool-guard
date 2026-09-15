@@ -20,7 +20,10 @@
 //
 // `details.fullOutputPath` is always preserved, including on a
 // `projection-applied` result, so a reducer that predates this contract still
-// finds the full log and can override the guard's projection.
+// finds the full log and can override the guard's projection. When pi did not
+// truncate but the guard persisted its own slow log, the guard publishes that
+// path as `details.fullOutputPath` too (the file is named `pi-bash-guard-*.log`
+// so consumers that only trust pi's `pi-bash-*.log` temp artifacts accept it).
 //
 // The shape is versioned and additive-only. Consumers MUST ignore unknown
 // fields and MUST fall back to the inline content when `version` is not
@@ -29,9 +32,10 @@
 //
 // `pi-tool-guard` also uses this record to stay honest with Pi itself: the
 // guard always preserves `details.fullOutputPath` and `details.truncation`,
-// even on a `projection-applied` result, so a downstream reducer can read the
-// exact full log. `piToolGuard.sourcePath` mirrors that pointer for consumers
-// that understand the contract.
+// even on a `projection-applied` result, and sets `details.fullOutputPath` to
+// its own persisted log when pi did not truncate, so a downstream reducer can
+// read the exact full log. `piToolGuard.sourcePath` mirrors that pointer for
+// consumers that understand the contract.
 
 export const PI_TOOL_GUARD_DETAILS_KEY = "piToolGuard" as const;
 export const PI_TOOL_GUARD_CONTRACT_VERSION = 1 as const;

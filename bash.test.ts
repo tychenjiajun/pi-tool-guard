@@ -1,19 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdtemp, rm, writeFile, readdir, realpath, lstat } from "node:fs/promises";
+import { readFileSync, rmSync, existsSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename, dirname } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import {
   buildNotice,
   buildSlowReadbackNotice,
   FAST_THRESHOLD_MS,
+  EMPTY_OUTPUT_PLACEHOLDER,
+  FULL_OUTPUT_TTL_MS,
   isProjectionNoop,
   runExtractorOnText,
   runExtractorOnFile,
+  sweepStaleFullOutputs,
   persistFullOutput,
   parseBashError,
 } from "./bash.ts";
@@ -63,6 +66,9 @@ describe("buildSlowReadbackNotice", () => {
     expect(notice).toContain("Avoid re-running");
     expect(notice).toContain("/tmp/full.log");
     expect(notice).toContain("instead of re-running");
+    // The `Full output:` form lets downstream reducers (SoL-Pi EPR) locate the
+    // guard's persisted log by regex when `details.fullOutputPath` is absent.
+    expect(notice).toContain("Full output: /tmp/full.log");
   });
 
   it("still warns to avoid re-running when no path was persisted", () => {
@@ -110,7 +116,7 @@ describe("fast command behavior", () => {
     });
 
     const result = await runExtractorOnText(mockPi, text, pipeline);
-    expect(result).toBe("line1\nline2");
+    expect(result).toEqual({ text: "line1\nline2", code: 0 });
     // `text` must travel as an argv element, not be spliced into the script.
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
@@ -130,7 +136,7 @@ describe("fast command behavior", () => {
     });
 
     const result = await runExtractorOnFile(mockPi, filePath, pipeline);
-    expect(result).toBe("last line");
+    expect(result).toEqual({ text: "last line", code: 0 });
     expect(mockPi.exec).toHaveBeenCalledWith("bash", [
       "-c",
       expect.stringContaining('"$1"'),
@@ -139,37 +145,47 @@ describe("fast command behavior", () => {
     ]);
   });
 
-  it("runExtractorOnText returns undefined on failure", async () => {
+  it("runExtractorOnText returns {text,code} for non-zero exit (code 2)", async () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
       code: 2,
       stdout: "",
     });
 
     const result = await runExtractorOnText(mockPi, "text", "head -1");
-    expect(result).toBeUndefined();
+    expect(result).toEqual({ text: "", code: 2 });
   });
 
-  it("F2: runExtractorOnText accepts exit-1 (grep no match) as empty projection", async () => {
+  it("F2: runExtractorOnText returns {text,code} for exit-1 (grep no match)", async () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
       code: 1,
       stdout: "",
     });
 
     const result = await runExtractorOnText(mockPi, "text", "grep nope");
-    expect(result).toBe("");
+    expect(result).toEqual({ text: "", code: 1 });
   });
 
-  it("F2: runExtractorOnFile accepts exit-1 (grep no match) as empty projection", async () => {
+  it("F2: runExtractorOnFile returns {text,code} for exit-1 (grep no match)", async () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
       code: 1,
       stdout: "",
     });
 
     const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "grep nope");
-    expect(result).toBe("");
+    expect(result).toEqual({ text: "", code: 1 });
   });
 
-  it("runExtractorOnFile returns undefined on failure", async () => {
+  it("runExtractorOnFile returns {text,code} for non-zero exit (code 2)", async () => {
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 2,
+      stdout: "",
+    });
+
+    const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "head -1");
+    expect(result).toEqual({ text: "", code: 2 });
+  });
+
+  it("runExtractorOnFile returns undefined only when pi.exec throws", async () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("fail"));
 
     const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "head -1");
@@ -186,7 +202,7 @@ describe("persistFullOutput", () => {
     const text = "line1\nline2\nline3";
     const path = persistFullOutput(text);
     expect(path).toBeDefined();
-    expect(path).toMatch(/^.*pi-tool-guard-[0-9a-f]+\.log$/);
+    expect(path).toMatch(/^.*pi-bash-guard-[0-9a-f]+\.log$/);
 
     const read = readFileSync(path!, "utf-8");
     expect(read).toBe(text);
@@ -202,6 +218,45 @@ describe("persistFullOutput", () => {
     // catch branch which is simple enough.
     expect(typeof path).toBe("string");
     rmSync(path!, { force: true });
+  });
+
+  it("sweeps stale guard temp files before writing", () => {
+    const stalePath = join(tmpdir(), `pi-bash-guard-${Date.now().toString(16)}-stale.log`);
+    writeFileSync(stalePath, "stale");
+    const old = new Date(Date.now() - (FULL_OUTPUT_TTL_MS + 1000));
+    utimesSync(stalePath, old, old);
+
+    const fresh = persistFullOutput("hello");
+    try {
+      expect(fresh).toBeDefined();
+      expect(existsSync(stalePath)).toBe(false);
+    } finally {
+      rmSync(stalePath, { force: true });
+      if (fresh) rmSync(fresh, { force: true });
+    }
+  });
+
+  it("produces an artifact SoL-Pi's EPR safePiBashTempPath accepts", async () => {
+    const text = `full log line\n${"x".repeat(5_000)}`;
+    const path = persistFullOutput(text);
+    try {
+      expect(path).toBeDefined();
+      // EPR's safePiBashTempPath trusts only pi-shaped names directly in the
+      // OS temp dir, so the guard's artifact must satisfy all three checks.
+      expect(/^pi-bash-[^/\\]+\.log$/u.test(basename(path!))).toBe(true);
+      const [candidate, root, status] = await Promise.all([
+        realpath(path!),
+        realpath(tmpdir()),
+        lstat(path!),
+      ]);
+      expect(status.isFile()).toBe(true);
+      expect(status.isSymbolicLink()).toBe(false);
+      expect(dirname(candidate)).toBe(root);
+      // ...and hold the exact, untruncated bytes the reducer will archive.
+      expect(readFileSync(path!, "utf-8")).toBe(text);
+    } finally {
+      rmSync(path!, { force: true });
+    }
   });
 });
 
@@ -882,13 +937,13 @@ describe("extractor execution (real shell)", () => {
 
   it("preserves real newlines so line-based extractors work", async () => {
     const out = await runExtractorOnText(pi, "FAIL test1\nFAIL test2\nPASS test3", "tail -1");
-    expect(out).toBe("PASS test3");
+    expect(out).toEqual({ text: "PASS test3", code: 0 });
   });
 
   it("does not expand $() or backticks from command output", async () => {
     const text = "$(echo pwned)\n`echo pwned`";
     const out = await runExtractorOnText(pi, text, "cat");
-    expect(out).toBe(text);
+    expect(out).toEqual({ text, code: 0 });
   });
 
   it("filters a file whose path contains spaces", async () => {
@@ -897,9 +952,62 @@ describe("extractor execution (real shell)", () => {
     await writeFile(file, "alpha\nbeta\n");
     try {
       const out = await runExtractorOnFile(pi, file, "head -1");
-      expect(out).toBe("alpha");
+      expect(out).toEqual({ text: "alpha", code: 0 });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("F6: sweepStaleFullOutputs", () => {
+  it("removes stale matching files and keeps fresh ones", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-tool-guard-sweep-"));
+    const fresh = join(dir, "pi-bash-guard-aaaaaaaa.log");
+    const stale = join(dir, "pi-bash-guard-bbbbbbbb.log");
+    const nonMatching = join(dir, "other-file.log");
+    await writeFile(fresh, "fresh");
+    await writeFile(stale, "stale");
+    await writeFile(nonMatching, "non-matching");
+
+    // Make `stal` look older than the TTL by setting its mtime in the past.
+    const staleTime = new Date(Date.now() - (FULL_OUTPUT_TTL_MS + 1000));
+    const { utimes } = await import("node:fs/promises");
+    await utimes(stale, staleTime, staleTime);
+
+    const removed = sweepStaleFullOutputs(dir, FULL_OUTPUT_TTL_MS);
+    expect(removed).toBe(1);
+
+    // Fresh and non-matching files remain.
+    const remaining = new Set(await readdir(dir));
+    expect(remaining.has("pi-bash-guard-aaaaaaaa.log")).toBe(true);
+    expect(remaining.has("pi-bash-guard-bbbbbbbb.log")).toBe(false);
+    expect(remaining.has("other-file.log")).toBe(true);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not remove files whose names do not match the pattern", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-tool-guard-sweep-"));
+    const file = join(dir, "not-a-guard-file.log");
+    await writeFile(file, "data");
+    const staleTime = new Date(Date.now() - (FULL_OUTPUT_TTL_MS + 1000));
+    const { utimes } = await import("node:fs/promises");
+    await utimes(file, staleTime, staleTime);
+
+    const removed = sweepStaleFullOutputs(dir, FULL_OUTPUT_TTL_MS);
+    expect(removed).toBe(0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("returns 0 when the directory does not exist", () => {
+    const removed = sweepStaleFullOutputs("/nonexistent/path/xyz", FULL_OUTPUT_TTL_MS);
+    expect(removed).toBe(0);
+  });
+});
+
+describe("EMPTY_OUTPUT_PLACEHOLDER", () => {
+  it("matches the literal string pi uses for empty results", () => {
+    expect(EMPTY_OUTPUT_PLACEHOLDER).toBe("(no output)");
   });
 });

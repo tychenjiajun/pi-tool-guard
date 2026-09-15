@@ -62,9 +62,13 @@ Only view extractors are stripped: `npm test | grep FAIL | head -5` → strips `
 
 **Multi-statement safety:** stripping is only attempted when the trailing view's stdout is the whole command's stdout. A lone pipeline, or one preceded by a **silent prefix** (`cd`, bare assignments, `true`, `:`, `test`, `[`, without redirects — e.g. `cd /tmp && npm test | tail`), is eligible. Anything else is left untouched: for `a && b | head`, re-applying `head` after stripping would return the head of `a`, not of `b`. This covers `;`/`&&`/`||` lists, grouped `(...)`/`{ ...; }` commands, and backgrounded earlier statements.
 
-**Exit codes:** The extractor helpers treat exit codes 0 and 1 as success and accept empty stdout. So `cmd | grep no-match` (grep exits 1) yields an empty projection, not a "failed extractor" fallthrough. Previously this was misclassified as a slow command.
+**Fast-path fidelity:** for fast commands the guard executes the *cleaned* command and re-applies the stripped extractor to pi's formatted result, rather than running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs.
 
-**Slow commands:** For slow commands (≥ 10s), the guard persists the full, unextracted output to a temp file even when it is below pi's 50KB/2000-line truncation limit, and returns the projected view (outcome `projection-applied`) instead of dumping the entire output. The LLM notice inlines that file path and tells the agent to read it on demand — e.g. the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — rather than re-running the expensive command. The guard never replays a previous run; every invocation executes the command again.
+**Exit codes:** Extractor exit codes are propagated, matching pi's own `cmd | extractor` behavior: a stripped pipeline whose re-applied extractor exits non-zero (e.g. `cmd | grep no-match`, where grep exits 1) fails with `Command exited with code 1`, instead of returning an empty success. On slow commands the error appends `Full output: <path>`.
+
+**Empty output:** an empty inline projection renders as `(no output)`, matching pi's own empty-result rendering.
+
+**Slow commands:** For slow commands (≥ 10s), the guard persists the full, unextracted output to a temp file (`pi-bash-guard-<hex>.log` in the OS temp dir; swept best-effort after 24h via `FULL_OUTPUT_TTL_MS` on subsequent persists) even when it is below pi's 50KB/2000-line truncation limit, and returns the projected view (outcome `projection-applied`) instead of dumping the entire output. The `pi-bash-` name plus a `details.fullOutputPath` pointer make that file readable by SoL-Pi's evidence-preserving reducer, so the full log stays reducible even when pi did not truncate. If the full output cannot be persisted (filesystem error) and pi did not truncate, the guard falls back to returning the full output (outcome `full-output`) rather than a projection, so the readback notice is never misleading. The LLM notice inlines that file path and tells the agent to read it on demand — e.g. the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — rather than re-running the expensive command. The guard never replays a previous run; every invocation executes the command again.
 
 **Timing split:** pi's built-in renderer prints one opaque `Took <total>` line. For a **slow** command where the guard ran a stripped extractor, that line is replaced with a SoL-Pi-style receipt. Fast commands keep pi's plain line — no receipt, no UI:
 
@@ -92,7 +96,7 @@ Bash runs a custom `execute` override:
 2. The cleaned command is run through the original built-in execute.
 3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
 4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
-5. If slow (truncated or not) → persists the full, unextracted output to a temp file, runs the extractor, returns the projected view + Full-Output Readback notice
+5. If slow (truncated or not) → persists the full, unextracted output to a temp file (`pi-bash-guard-<hex>.log`, OS temp dir; swept best-effort after 24h via `FULL_OUTPUT_TTL_MS` on subsequent persists), runs the extractor, returns the projected view + Full-Output Readback notice (falls back to outcome `full-output` if persisting fails and pi did not truncate)
 6. If the command exits non-zero → recovers the output and `Full output: <path>` pointer from the error, applies the stripped (view) extractor to the available full output, and throws an error whose message is the projected text followed by a bracket note preserving the exit code and full-output path
 
 No session scanning. Error path: a thrown error cannot carry `details`, so no `piToolGuard` contract is published on the error path — this is a documented limitation.
@@ -128,8 +132,8 @@ interface PiToolGuardDetails {
 }
 ```
 
-- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **always keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
-- `outcome: "full-output"` — `content` is the cleaned command's full output and `details.fullOutputPath` is kept.
+- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **always keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. When pi did not truncate but the guard persisted its own slow log, the guard also publishes that `pi-bash-guard-*.log` path as `details.fullOutputPath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
+- `outcome: "full-output"` — `content` is the cleaned command's full output and `details.fullOutputPath` is kept. Also the fallback when a slow command's full output cannot be persisted (filesystem error) and pi did not truncate.
 - `slow` — optional boolean; `true` means the cleaned command ran for at least `FAST_THRESHOLD_MS`. Only slow runs surface guard UI (Notice, footer status, receipt); fast commands look exactly like the built-in bash tool.
 - No extractors stripped → no record; `details` is left untouched.
 
