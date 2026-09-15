@@ -5,19 +5,23 @@ A pi extension that intercepts and corrects LLM tool calls before execution. It 
 ## Language
 
 **Extractor**:
-A trailing command in a bash pipeline that filters or transforms output (`head`, `tail`, `grep`, etc.).
+A trailing command in a bash pipeline that filters or transforms output. Two kinds: **View Extractors** (`head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more`) are safe to strip and re-apply; **Transform Extractors** (`sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `column`, `jq`, `yq`, `tr`) are NOT stripped — the guard leaves the command unchanged so the shell applies the transform.
 _Avoid_: filter, pipe command
 
 **Pipeline Stripping**:
-Removing trailing **Extractors** from a bash command so the full output is available for further processing. "Trailing" is the end of the **whole** command: only the final `;`/`&&` statement's pipeline may lose extractors, and every earlier statement is preserved verbatim.
+Removing trailing **View Extractors** from a bash command so the full output is available for further processing. **Transform Extractors** are left in place. Only the **final pipeline** is eligible, and only when its stdout is the whole command's stdout: with `;`/`&&`/`||` the stripped extractor would also filter the earlier statements, so the command is left untouched unless the entire prefix is a **Silent Prefix**. Redirections (`<`, `>`, `2>&1`) stay attached to their command — an input redirect on the cleaned command is kept, and a redirect on a stripped view travels with it in the removed pipeline. A final statement that is **backgrounded** with `&` is never stripped (its output is not synchronously capturable, and slicing out the view would drop the `&`, silently foregrounding the job).
 _Avoid_: pipeline trimming, command rewriting
+
+**Silent Prefix**:
+The statements or AndOr members that run before a command's final pipeline (`cd /tmp && npm test | tail`, `FOO=bar; npm test | head`). They share the script's stdout, so stripping the final extractor is only faithful when the whole prefix provably writes nothing to stdout. The allowlist is tiny and structural: `cd`, `true`, `:`, `test`, `[`, and bare assignments — with no redirects (a `2>&1` could merge stderr into the stream the extractor reads). Grouped (`(...)`, `{ ...; }`) and backgrounded prefixes are never assumed silent.
+_Avoid_: quiet prefix, empty prefix
 
 **Fast Command**:
 A bash command that completes in under 10 seconds (configurable via `FAST_THRESHOLD_MS`).
 _Avoid_: quick command, short command
 
 **Slow Command**:
-A bash command that takes 10 seconds or more to complete.
+A bash command that takes 10 seconds or more to complete. The guard persists the full output to a temp file (even below pi's truncation limit), runs the stripped view extractor, and returns the projected view + full-output pointer with an **LLM Notice**.
 _Avoid_: long command, heavy command
 
 **Truncation**:
@@ -37,27 +41,35 @@ Converting incorrect or alias field names to the canonical names expected by the
 _Avoid_: field mapping, alias resolution
 
 **Guard Contract**:
-The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output.
+The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output. Not published on the error (non-zero exit) path — a thrown error cannot carry `details`.
 _Avoid_: metadata blob, guard flag
 
 **Projection Applied**:
-A Guard Contract outcome meaning `content` is the result of re-running the stripped extractor pipeline — the user's requested view, applied as a fallback. `details.fullOutputPath`/`truncation` are kept so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection.
+A Guard Contract outcome meaning `content` is the result of re-running the stripped view extractor pipeline — the user's requested view, applied as a fallback. `details.fullOutputPath`/`truncation` are always kept so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection.
 _Avoid_: filtered result, reduced
 
 **Full Output**:
-A Guard Contract outcome meaning `content` is the cleaned command's full (possibly truncated) output — the extractor was not applied (slow command). `details.fullOutputPath` is preserved.
+A Guard Contract outcome meaning `content` is the cleaned command's full (possibly truncated) output — the extractor was not applied. `details.fullOutputPath` is preserved.
 _Avoid_: raw result
 
 **Source Path**:
 The `piToolGuard.sourcePath` field pointing at the untruncated output file. It mirrors `details.fullOutputPath`, which guard always keeps so pre-contract reducers still find the full log.
 _Avoid_: fullOutputPath, temp path
 
+**Full-Output Readback**:
+The **LLM Notice** appended to a **Slow Command**'s projected result. It inlines the full-output file path and tells the agent to read that file on demand (e.g. the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>`) instead of re-running the expensive command. The guard never replays a previous run — every invocation executes the command again.
+_Avoid_: cache hit, replay, memoization
+
+**Error (Non-zero Exit)**:
+When the cleaned command exits non-zero, pi's bash tool throws. The guard recovers the output and `Full output: <path>` pointer from that error, applies the stripped view extractor to the available full output, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. No Guard Contract is published on this path.
+_Avoid_: error projection, exit code recovery
+
 **Timing Split**:
-Illustrating the per-phase wall clock — `commandMs` (cleaned command execution) versus `extractorMs` (guard's extractor projection). Published as the optional `piToolGuard.timing` record and rendered only when the guard actually ran an extractor.
+Illustrating the per-phase wall clock — `commandMs` (cleaned command execution) versus `extractorMs` (guard's extractor projection). Published as the optional `piToolGuard.timing` record and rendered only for a **Slow Command** that actually ran an extractor.
 _Avoid_: timing breakdown, duration chart
 
 **Guard Receipt**:
-The SoL-Pi-style themed block that replaces pi's single `Took <total>` line: a `🛡 pi-tool-guard · <pipeline>` title, an optional `Context saved · …` line from the **Projection Stats**, and the **Timing Split** bar. Rendered by `tui.ts` only for a non-**No-op Projection**.
+The SoL-Pi-style themed block that replaces pi's single `Took <total>` line: a `🛡 pi-tool-guard · <pipeline>` title, an optional `Context saved · …` line from the **Projection Stats**, and the **Timing Split** bar. Rendered by `tui.ts` only for a **Slow Command** whose projection is not a **No-op Projection**. **Fast Commands** show no guard UI at all — no **Notice**, no receipt — so they look exactly like the built-in bash tool.
 _Avoid_: timing illustration, toast
 
 **Projection Stats**:
@@ -65,19 +77,21 @@ Before/after line and byte counts of a projection (`piToolGuard.projection`), me
 _Avoid_: savings, reduction metrics
 
 **No-op Projection**:
-A **Projection Applied** whose content is identical (ignoring trailing whitespace) to the cleaned command's own output. The guard still stamps the **Guard Contract** but shows no **Notice** and no **Guard Receipt**, because it changed nothing the user would see.
+A **Projection Applied** whose content is identical (ignoring trailing whitespace) to the cleaned command's own output. The guard still stamps the **Guard Contract** but shows no **Notice** and no **Guard Receipt**, because it changed nothing the user would see. Only computed for inline (non-truncated) projections; for projections from a saved file the guard cannot cheaply compare against the full text, so it does not claim a no-op.
 _Avoid_: empty filter, redundant projection
 
 ## Relationships
 
-- A **Pipeline** contains one or more commands, with optional **Extractors** at the end
-- **Fast Commands** have extractors piped through them (or run on `fullOutputPath` if truncated)
-- **Slow Commands** return results as-is with an **LLM Notice**
+- A **Pipeline** contains one or more commands, with optional **View Extractors** at the end (**Transform Extractors** are never stripped)
+- A **Pipeline** is stripped only when it is the whole command, or when every statement before it is a **Silent Prefix**; otherwise the command is left untouched
+- **Fast Commands** have view extractors piped through them (or run on `fullOutputPath` if truncated)
+- **Slow Commands** persist the full, unextracted output to a file, run the view extractor, and return the projected view + **Full-Output Readback** as an **LLM Notice**
+- **Error (Non-zero Exit)** recovers output from the thrown error, applies the view extractor, and throws a projected error with exit code + path
 - **Truncation** is independent of speed — a fast command can be truncated, a slow command may not be
-- The **Guard Contract** is stamped only when extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too
-- A **Timing Split** rides on the **Guard Contract**; it is rendered only when `extractorMs > 0` (a projection actually ran), so slow/full-output commands keep pi's plain `Took` line
-- A **Guard Receipt** bundles the **Timing Split** with **Projection Stats**; it replaces pi's `Took` line only when the guard actually projected a change
-- A **No-op Projection** is a **Projection Applied** that leaves the output unchanged, so guard suppresses both its **Notice** and its **Guard Receipt** while still publishing the contract
+- The **Guard Contract** is stamped only when view extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while always keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too; no contract is published on the error path
+- A **Timing Split** rides on the **Guard Contract**; it is rendered only for a **Slow Command** when `extractorMs > 0` (a projection actually ran)
+- A **Guard Receipt** bundles the **Timing Split** with **Projection Stats**; it replaces pi's `Took` line only for a **Slow Command** whose projection changed the output — **Fast Commands** keep pi's plain line
+- A **No-op Projection** is a **Projection Applied** that leaves the output unchanged (inline projections only), so guard suppresses both its **Notice** and its **Guard Receipt** while still publishing the contract
 
 ## Example dialogue
 
@@ -85,7 +99,10 @@ _Avoid_: empty filter, redundant projection
 > **Domain expert:** "It strips `head`, runs `ls`, then pipes the result through `head`. The user sees a UI notice, but the LLM gets the filtered result only."
 >
 > **Dev:** "What about `npm test | tail -10` if it takes 30 seconds?"
-> **Domain expert:** "It's a slow command. The guard strips `tail`, runs `npm test`, returns the full result to the LLM with a 'slow command' hint, shows a UI notice, and stamps the **Guard Contract** with outcome **Full Output**. A downstream reducer can then safely archive the full log via `fullOutputPath`."
+> **Domain expert:** "It's a slow command. The guard strips `tail`, persists the full, unextracted output to a temp file, runs `tail` on it, and returns the projected view to the LLM with a **Full-Output Readback** notice: the notice inlines the file path and tells the agent to read it on demand instead of re-running. It also shows a UI notice and stamps the **Guard Contract** with outcome **Projection Applied**, so a downstream reducer can archive the full log via `fullOutputPath`. The guard does not replay runs — a later identical `npm test` executes again."
+>
+> **Dev:** "And if it exits non-zero?"
+> **Domain expert:** "The guard recovers the output and `Full output: <path>` from the error, applies the stripped view extractor, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. No Guard Contract is published on this path — a thrown error cannot carry `details`."
 >
 > **Dev:** "And if it finishes in 2 seconds?"
 > **Domain expert:** "**Projection Applied**: the guard runs `tail` on the result as a fallback, but keeps `fullOutputPath`, so a reducer that understands the contract (or just reads **Source Path**) can override guard's projection with an evidence-checked receipt for the full log."

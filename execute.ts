@@ -1,14 +1,16 @@
 import type { ExtensionAPI, ExtensionContext, AgentToolResult, BashToolDetails } from "@earendil-works/pi-coding-agent";
 import {
   stripTrailingExtractors,
-  extractFullOutputPath,
 } from "./pipeline.ts";
 import {
   FAST_THRESHOLD_MS,
   buildNotice,
+  buildSlowReadbackNotice,
   isProjectionNoop,
   runExtractorOnFile,
   runExtractorOnText,
+  persistFullOutput,
+  parseBashError,
 } from "./bash.ts";
 import { formatProjectionSavings, measureText } from "./format.ts";
 import { showGuardStatus } from "./tui.ts";
@@ -89,7 +91,7 @@ function guardRecord(
   outcome: PiToolGuardOutcome,
   sourcePath: string | undefined,
   timing: PiToolGuardTiming,
-  extras: { projection?: PiToolGuardProjection; noop?: boolean } = {},
+  extras: { projection?: PiToolGuardProjection; noop?: boolean; slow?: boolean } = {},
 ): PiToolGuardDetails {
   return {
     version: PI_TOOL_GUARD_CONTRACT_VERSION,
@@ -105,7 +107,43 @@ function guardRecord(
 }
 
 // ---------------------------------------------------------------------------
-// Core execute logic (extracted for testability)
+// F1: error rethrow with projection
+// ---------------------------------------------------------------------------
+
+/**
+ * F1: when the cleaned command throws, parse the error for a truncation banner
+ * and exit code, run the stripped extractor on the full output (file or
+ * inline), and rethrow a new Error whose message is the projected text plus a
+ * `[Command exited with code N. Full output: <path>]` suffix. If the error is
+ * not a bash exit-code error (abort/timeout), rethrow it unchanged.
+ */
+export async function rethrowGuardedError(
+  ctx: ExecuteContext,
+  stripped: { removedNames: string[]; removedPipeline: string },
+  originalCommand: string,
+  err: unknown,
+): Promise<never> {
+  const parsed = parseBashError(err);
+  if (parsed.exitCode === undefined) throw err;
+
+  const extracted = parsed.fullOutputPath
+    ? await runExtractorOnFile(ctx.pi, parsed.fullOutputPath, stripped.removedPipeline)
+    : await runExtractorOnText(ctx.pi, parsed.text, stripped.removedPipeline);
+
+  const body = extracted !== undefined ? extracted : parsed.text;
+  if (extracted !== undefined) {
+    const mode = parsed.fullOutputPath ? "fast-file" : "fast";
+    const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, mode);
+    ctx.ctx.ui.notify(uiNotice, "info");
+  }
+
+  const suffix = [`Command exited with code ${parsed.exitCode}`];
+  if (parsed.fullOutputPath) suffix.push(`Full output: ${parsed.fullOutputPath}`);
+  throw new Error(`${body}\n\n[${suffix.join(". ")}]`);
+}
+
+// ---------------------------------------------------------------------------
+// Core execute logic
 // ---------------------------------------------------------------------------
 
 export async function executeBashGuarded(
@@ -139,109 +177,88 @@ export async function executeBashGuarded(
   try {
     result = await ctx.originalExecute(toolCallId, cleanedParams, signal, onUpdate, execCtx);
   } catch (err) {
-    // On error: check if output was saved to file, run extractor on it.
-    // A thrown error cannot carry `details`, so this path intentionally does
-    // not publish the guard contract.
-    const errText = err instanceof Error ? err.message : String(err);
-    const fullPath = extractFullOutputPath(errText);
-    if (fullPath) {
-      const extracted = await runExtractorOnFile(ctx.pi, fullPath, stripped.removedPipeline);
-      if (extracted !== undefined) {
-        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast-file");
-        ctx.ctx.ui.notify(uiNotice, "info");
-        throw new Error(extracted);
-      }
-    }
-    throw err;
+    return await rethrowGuardedError(ctx, stripped, originalCommand, err);
   }
-
-  // Time spent applying the stripped extractor pipeline. Accumulated across a
-  // failed attempt so the illustration still shows guard's wasted cost.
   const commandMs = Date.now() - commandStart;
-  let extractorMs = 0;
-  const totalMs = () => commandMs + extractorMs;
+
   const resultDetails = result.details as BashToolDetails | undefined;
   const fullOutputPath = resultDetails?.fullOutputPath;
+  const isSlow = commandMs >= FAST_THRESHOLD_MS;
 
-  // Case 1: Fast command, truncated → run extractor on the full output file
-  if (commandMs < FAST_THRESHOLD_MS && fullOutputPath) {
-    const extractorStart = Date.now();
-    const extracted = await runExtractorOnFile(ctx.pi, fullOutputPath, stripped.removedPipeline);
-    extractorMs += Date.now() - extractorStart;
-    if (extracted !== undefined) {
-      const noop = isProjectionNoop(extracted, resultText(result));
-      if (!noop) {
-        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast-file");
-        ctx.ctx.ui.notify(uiNotice, "info");
-        showGuardStatus(ctx.ctx, `🛡 ${stripped.removedPipeline} · piped the saved temp file`);
-      }
-      return withGuardDetails(
-        {
-          content: [{ type: "text" as const, text: extracted }],
-          details: result.details,
-        },
-        guardRecord(
-          originalCommand,
-          stripped.cleaned,
-          stripped,
-          "projection-applied",
-          fullOutputPath,
-          { commandMs, extractorMs, totalMs: totalMs() },
-          { noop },
-        ),
-      );
-    }
+  // F4: slow commands always get a persisted full-output file
+  let sourcePath = fullOutputPath;
+  if (isSlow && !sourcePath) {
+    sourcePath = persistFullOutput(resultText(result));
   }
 
-  // Case 2: Fast command, not truncated → pipe result through extractor
-  if (commandMs < FAST_THRESHOLD_MS && !fullOutputPath) {
-    const originalText = resultText(result);
-    const originalSize = measureText(originalText);
+  // Apply the stripped extractor pipeline to the full output (file or inline).
+  const inlineSource = sourcePath ? undefined : resultText(result);
+  const extractorStart = Date.now();
+  const extracted = sourcePath
+    ? await runExtractorOnFile(ctx.pi, sourcePath, stripped.removedPipeline)
+    : await runExtractorOnText(ctx.pi, inlineSource ?? "", stripped.removedPipeline);
+  const extractorMs = Date.now() - extractorStart;
+  const timing: PiToolGuardTiming = { commandMs, extractorMs, totalMs: commandMs + extractorMs };
 
-    const extractorStart = Date.now();
-    const extracted = await runExtractorOnText(ctx.pi, originalText, stripped.removedPipeline);
-    extractorMs += Date.now() - extractorStart;
-    if (extracted !== undefined) {
-      const projectedSize = measureText(extracted);
-      const projection: PiToolGuardProjection = {
-        inputLines: originalSize.lines,
-        inputBytes: originalSize.bytes,
-        outputLines: projectedSize.lines,
-        outputBytes: projectedSize.bytes,
-      };
-      const noop = isProjectionNoop(extracted, originalText);
+  if (extracted !== undefined) {
+    // F5: noop detection — only meaningful for inline (non-file) projections
+    const noop = inlineSource !== undefined ? isProjectionNoop(extracted, inlineSource) : false;
+    const projection: PiToolGuardProjection | undefined =
+      inlineSource !== undefined
+        ? (() => {
+            const inputSize = measureText(inlineSource);
+            const outputSize = measureText(extracted);
+            return {
+              inputLines: inputSize.lines,
+              inputBytes: inputSize.bytes,
+              outputLines: outputSize.lines,
+              outputBytes: outputSize.bytes,
+            };
+          })()
+        : undefined;
 
-      if (!noop) {
-        const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "fast");
-        ctx.ctx.ui.notify(uiNotice, "info");
-        showGuardStatus(
-          ctx.ctx,
-          `🛡 ${stripped.removedPipeline} · ${formatProjectionSavings(projection)}`,
-        );
-      }
-      return withGuardDetails(
-        {
-          content: [{ type: "text" as const, text: extracted }],
-          details: result.details,
-        },
-        guardRecord(
-          originalCommand,
-          stripped.cleaned,
-          stripped,
-          "projection-applied",
-          undefined,
-          { commandMs, extractorMs, totalMs: totalMs() },
-          { projection, noop },
-        ),
+    // Slow commands persist the full, unextracted output so the agent can
+    // read it later instead of re-running the command. Without an extractor
+    // notice there is nothing for the file to point at, so only stamp it here.
+    const notices: string[] = [];
+    if (isSlow) notices.push(buildSlowReadbackNotice(originalCommand, sourcePath));
+
+    if (!noop && isSlow) {
+      const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
+      ctx.ctx.ui.notify(uiNotice, "info");
+      showGuardStatus(
+        ctx.ctx,
+        `🛡 ${stripped.removedPipeline} · ${projection ? formatProjectionSavings(projection) : "projection applied"}`,
       );
     }
+
+    const text = notices.length ? `${extracted}\n\n${notices.join("\n\n")}` : extracted;
+    return withGuardDetails(
+      {
+        content: [{ type: "text" as const, text }],
+        details: result.details,
+      },
+      guardRecord(
+        originalCommand,
+        stripped.cleaned,
+        stripped,
+        "projection-applied",
+        sourcePath,
+        timing,
+        { projection, noop, slow: isSlow },
+      ),
+    );
   }
 
-  // Case 3: Slow command (truncated or not) → return result with LLM notice
-  const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
-  ctx.ctx.ui.notify(uiNotice, "info");
-  showGuardStatus(ctx.ctx, `🛡 ${stripped.removedPipeline} · full output kept`);
-  const llmNotice = `This is a slow command. Avoid re-running; prefer reading from the full output path if available.`;
+  // Extractor failed to run → return full output with LLM notice
+  if (isSlow) {
+    const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
+    ctx.ctx.ui.notify(uiNotice, "info");
+    showGuardStatus(ctx.ctx, `🛡 ${stripped.removedPipeline} · full output kept`);
+  }
+  const llmNotice = isSlow
+    ? buildSlowReadbackNotice(originalCommand, sourcePath)
+    : "The projection could not be applied; showing the full output.";
   return withGuardDetails(
     {
       content: [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
@@ -252,8 +269,9 @@ export async function executeBashGuarded(
       stripped.cleaned,
       stripped,
       "full-output",
-      fullOutputPath,
-      { commandMs, extractorMs, totalMs: totalMs() },
+      sourcePath,
+      timing,
+      { slow: isSlow },
     ),
   );
 }

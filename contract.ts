@@ -27,11 +27,11 @@
 // understood, so an older consumer never expands a projection back into the
 // full log.
 //
-// `pi-tool-guard` also uses this record to stay honest with Pi itself: on a
-// `projection-applied` result it removes `details.fullOutputPath` and
-// `details.truncation`, because the visible content is no longer a truncated
-// full output. `sourcePath` keeps the pointer for consumers that understand
-// the contract.
+// `pi-tool-guard` also uses this record to stay honest with Pi itself: the
+// guard always preserves `details.fullOutputPath` and `details.truncation`,
+// even on a `projection-applied` result, so a downstream reducer can read the
+// exact full log. `piToolGuard.sourcePath` mirrors that pointer for consumers
+// that understand the contract.
 
 export const PI_TOOL_GUARD_DETAILS_KEY = "piToolGuard" as const;
 export const PI_TOOL_GUARD_CONTRACT_VERSION = 1 as const;
@@ -101,6 +101,12 @@ export interface PiToolGuardDetails {
    * then a no-op: it publishes the contract but shows no Notice and no receipt.
    */
   readonly noop?: boolean;
+  /**
+   * True when the cleaned command ran for at least `FAST_THRESHOLD_MS`. Only
+   * slow runs surface guard UI (Notice, footer status, Guard Receipt); fast
+   * commands stay visually identical to the built-in bash tool.
+   */
+  readonly slow?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -157,6 +163,7 @@ export function readPiToolGuardDetails(details: unknown): PiToolGuardDetails | u
     timing,
     projection,
     noop,
+    slow,
   } = record;
 
   if (version !== PI_TOOL_GUARD_CONTRACT_VERSION) return undefined;
@@ -178,5 +185,6 @@ export function readPiToolGuardDetails(details: unknown): PiToolGuardDetails | u
     ...(parsedTiming ? { timing: parsedTiming } : {}),
     ...(parsedProjection ? { projection: parsedProjection } : {}),
     ...(typeof noop === "boolean" ? { noop } : {}),
+    ...(typeof slow === "boolean" ? { slow } : {}),
   };
 }

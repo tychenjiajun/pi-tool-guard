@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { stripTrailingExtractors, extractFullOutputPath } from "./pipeline.ts";
+import {
+  stripTrailingExtractors,
+  extractFullOutputPath,
+  classifyExtractor,
+  VIEW_EXTRACTORS,
+  TRANSFORM_EXTRACTORS,
+} from "./pipeline.ts";
 
 // ---------------------------------------------------------------------------
 // Real-world cases from ~/.pi/agent/sessions/
@@ -31,10 +37,11 @@ describe("stripTrailingExtractors", () => {
     });
 
     it("npm run typecheck 2>&1 && npm run build 2>&1 | tail -5", () => {
-      const r = stripTrailingExtractors("npm run typecheck 2>&1 && npm run build 2>&1 | tail -5");
-      expect(r).toBeDefined();
-      expect(r!.removedNames).toEqual(["tail"]);
-      expect(r!.cleaned).toBe("npm run typecheck 2>&1 && npm run build 2>&1");
+      // `typecheck` writes to stdout before the piped `build`, so re-applying
+      // `tail` to the stripped command would tail typecheck's output too.
+      expect(
+        stripTrailingExtractors("npm run typecheck 2>&1 && npm run build 2>&1 | tail -5"),
+      ).toBeUndefined();
     });
 
     it("find src -type f -name '*.ts' | head -20", () => {
@@ -226,17 +233,16 @@ describe("stripTrailingExtractors", () => {
     });
 
     it("cat file | sort", () => {
-      // sort IS an extractor
+      // sort is a TRANSFORM extractor (F7): stripping it would silently drop
+      // the transformation, so the command is left completely untouched.
       const r = stripTrailingExtractors("cat file | sort");
-      expect(r).toBeDefined();
-      expect(r!.removedNames).toEqual(["sort"]);
+      expect(r).toBeUndefined();
     });
 
     it("cat file | wc -l", () => {
-      // wc IS an extractor
+      // wc is a TRANSFORM extractor (F7): the command is left untouched.
       const r = stripTrailingExtractors("cat file | wc -l");
-      expect(r).toBeDefined();
-      expect(r!.removedNames).toEqual(["wc"]);
+      expect(r).toBeUndefined();
     });
   });
 
@@ -311,11 +317,11 @@ describe("stripTrailingExtractors", () => {
     });
 
     it("multiple && with head pipelines (TOP CPU/MEM case)", () => {
+      // The `echo` labels and the first `head -15` all write to the same
+      // stdout; stripping the final `head -10` would scope it to the whole
+      // script instead of just the last `ps`.
       const cmd = 'echo "=== TOP CPU ===" && ps aux --sort=-%cpu 2>/dev/null | head -15 && echo "=== TOP MEM ===" && ps aux --sort=-%mem 2>/dev/null | head -10';
-      const r = stripTrailingExtractors(cmd);
-      expect(r).toBeDefined();
-      expect(r!.removedNames).toEqual(["head"]);
-      expect(r!.cleaned).toBe('echo "=== TOP CPU ===" && ps aux --sort=-%cpu 2>/dev/null | head -15 && echo "=== TOP MEM ===" && ps aux --sort=-%mem 2>/dev/null');
+      expect(stripTrailingExtractors(cmd)).toBeUndefined();
     });
   });
 
@@ -326,33 +332,282 @@ describe("stripTrailingExtractors", () => {
       expect(stripTrailingExtractors("echo a | head; echo b")).toBeUndefined();
     });
 
-    it("strips only the final statement's extractor and keeps earlier statements", () => {
-      const r = stripTrailingExtractors("echo a; ls | head");
-      expect(r).toBeDefined();
-      expect(r!.removedNames).toEqual(["head"]);
-      expect(r!.cleaned).toBe("echo a; ls");
+    it("leaves `echo a; ls | head` untouched (echo writes to the same stdout)", () => {
+      expect(stripTrailingExtractors("echo a; ls | head")).toBeUndefined();
     });
 
-    it("keeps a mid-command pipeline intact when only the tail is stripped", () => {
+    it("leaves a command untouched when an intervening statement writes to stdout", () => {
       const cmd = 'cd /tmp && grep -n "x" f.ts | head -20; echo ====; grep -n "y" f.ts | grep -n "z"';
-      const r = stripTrailingExtractors(cmd);
-      expect(r).toBeDefined();
-      // The final `grep -n "z"` is the trailing extractor...
-      expect(r!.removedNames).toEqual(["grep"]);
-      expect(r!.removedPipeline).toBe('grep -n "z"');
-      // ...and everything before it (including the mid-command `| head -20`
-      // and the `echo ====`) is preserved verbatim.
-      expect(r!.cleaned).toBe(
-        'cd /tmp && grep -n "x" f.ts | head -20; echo ====; grep -n "y" f.ts',
-      );
+      expect(stripTrailingExtractors(cmd)).toBeUndefined();
     });
 
-    it("does not drop a later statement when stripping the last one", () => {
-      const r = stripTrailingExtractors("ls | head; echo done | tail");
+    it("leaves `ls | head; echo done | tail` untouched (earlier pipeline emits)", () => {
+      expect(stripTrailingExtractors("ls | head; echo done | tail")).toBeUndefined();
+    });
+  });
+
+  // ── F7: transform extractors are never stripped ──────────────────────
+
+  describe("F7 transform guard", () => {
+    it("leaves a pure transform pipeline untouched", () => {
+      // `sort` is a transform — stripping it would drop the ordering.
+      expect(stripTrailingExtractors("npm test | sort")).toBeUndefined();
+    });
+
+    it("leaves a transform-before-view pipeline untouched", () => {
+      // `sort` (transform) precedes `head` (view) in the trailing pipeline;
+      // the transform wins and nothing is stripped.
+      expect(stripTrailingExtractors("npm test | sort | head -5")).toBeUndefined();
+    });
+
+    it("strips view-only pipelines", () => {
+      const r = stripTrailingExtractors("npm test | grep FAIL | head -5");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["grep", "head"]);
+      expect(r!.cleaned).toBe("npm test");
+    });
+
+    it("strips a view pipeline with redirections", () => {
+      const r = stripTrailingExtractors("npm test 2>&1 | tail -20");
       expect(r).toBeDefined();
       expect(r!.removedNames).toEqual(["tail"]);
-      expect(r!.cleaned).toBe("ls | head; echo done");
+      expect(r!.cleaned).toBe("npm test 2>&1");
     });
+
+    it("leaves a trailing transform in a multi-statement command untouched", () => {
+      // `sort` is a transform in the final statement's pipeline.
+      expect(stripTrailingExtractors("echo hello | cat; npm run build | sort")).toBeUndefined();
+    });
+  });
+
+  // ── Redirections: `<` / `>` travel with their command ─────────────────
+
+  describe("redirections", () => {
+    it("strips a trailing view while keeping an input redirect on the cleaned command", () => {
+      const r = stripTrailingExtractors("grep foo < input.txt | head -5");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.removedPipeline).toBe("head -5");
+      expect(r!.cleaned).toBe("grep foo < input.txt");
+    });
+
+    it("keeps an input redirect on the cleaned command when several views are stripped", () => {
+      const r = stripTrailingExtractors("cat < in.txt | grep x | tail -2");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["grep", "tail"]);
+      expect(r!.removedPipeline).toBe("grep x | tail -2");
+      expect(r!.cleaned).toBe("cat < in.txt");
+    });
+
+    it("keeps an output redirect on the cleaned command out of the extracted pipeline", () => {
+      const r = stripTrailingExtractors("npm test > out.txt | head -5");
+      expect(r).toBeDefined();
+      expect(r!.cleaned).toBe("npm test > out.txt");
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.removedPipeline).toBe("head -5");
+    });
+
+    it("moves an output redirect that sits on the trailing view into removedPipeline", () => {
+      // The redirect belongs to `head`, so it is re-applied with the view
+      // rather than left on the cleaned command.
+      const r = stripTrailingExtractors("npm test | head -5 > out.txt");
+      expect(r).toBeDefined();
+      expect(r!.cleaned).toBe("npm test");
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.removedPipeline).toBe("head -5 > out.txt");
+    });
+
+    it("strips a view after a combined stderr+stdout redirect", () => {
+      const r = stripTrailingExtractors("npm test 2>&1 > out.log | tail -20");
+      expect(r).toBeDefined();
+      expect(r!.cleaned).toBe("npm test 2>&1 > out.log");
+      expect(r!.removedNames).toEqual(["tail"]);
+      expect(r!.removedPipeline).toBe("tail -20");
+    });
+
+    it("leaves a standalone extractor with an input redirect untouched", () => {
+      // `head -5 < file` is the whole command, not a trailing pipeline step.
+      expect(stripTrailingExtractors("head -5 < file")).toBeUndefined();
+    });
+
+    it("leaves a command with only an input redirect untouched", () => {
+      expect(stripTrailingExtractors("cat < file")).toBeUndefined();
+    });
+  });
+
+  // ── Background operator `&` ──────────────────────────────────────────
+
+  describe("background operator &", () => {
+    it("leaves an earlier backgrounded statement untouched (its output can interleave)", () => {
+      // A backgrounded job inherits the script's stdout, so its output can
+      // interleave with the final pipeline and would be caught by the
+      // re-applied extractor.
+      expect(stripTrailingExtractors("command a | head & command b | tail")).toBeUndefined();
+    });
+
+    it("leaves multiple earlier backgrounded pipelines untouched", () => {
+      expect(stripTrailingExtractors("cmd | head & cmd2 | tail & cmd3 | grep x")).toBeUndefined();
+    });
+
+    it("does not strip when the final statement itself is backgrounded", () => {
+      // Slicing out `head` here would drop the trailing `&` and turn the
+      // background job into a foreground one.
+      expect(stripTrailingExtractors("command a | head &")).toBeUndefined();
+      expect(stripTrailingExtractors("npm test 2>&1 | tail -20 &")).toBeUndefined();
+      expect(stripTrailingExtractors("npm test 2>&1 | tail -20 > out.txt &")).toBeUndefined();
+    });
+
+    it("leaves an earlier backgrounded view alone when the last statement is not a pipeline", () => {
+      const r = stripTrailingExtractors("command a | head -5 & command b");
+      expect(r).toBeUndefined();
+    });
+
+    it("leaves a backgrounded subshell before a view untouched", () => {
+      expect(stripTrailingExtractors("(command a | head) & command b | tail")).toBeUndefined();
+    });
+  });
+
+  // ── Multi-statement / bracket safety ───────────────────────────────
+
+  describe("multi-statement and bracket safety", () => {
+    it("leaves the reported `a | head && b | tail` case untouched", () => {
+      expect(
+        stripTrailingExtractors("slow-command-a | head -n 10 && slow-command-b | tail -n 20"),
+      ).toBeUndefined();
+    });
+
+    it("leaves `a && b | head` untouched (head would capture a, not b)", () => {
+      expect(stripTrailingExtractors("a && b | head")).toBeUndefined();
+    });
+
+    it("leaves `a && b | tail` untouched", () => {
+      expect(stripTrailingExtractors("a && b | tail")).toBeUndefined();
+    });
+
+    it("leaves `a | head; b | tail` untouched", () => {
+      expect(stripTrailingExtractors("a | head; b | tail")).toBeUndefined();
+    });
+
+    it("leaves `a | head || b | tail` untouched", () => {
+      expect(stripTrailingExtractors("a | head || b | tail")).toBeUndefined();
+    });
+
+    it("leaves `(a | head) && (b | tail)` untouched", () => {
+      expect(stripTrailingExtractors("(a | head) && (b | tail)")).toBeUndefined();
+    });
+
+    it("leaves `{ a | head; } && { b | tail; }` untouched", () => {
+      expect(stripTrailingExtractors("{ a | head; } && { b | tail; }")).toBeUndefined();
+    });
+
+    it("leaves `a && (b | tail)` untouched", () => {
+      expect(stripTrailingExtractors("a && (b | tail)")).toBeUndefined();
+    });
+
+    it("leaves `(a | head) && b | tail` untouched", () => {
+      expect(stripTrailingExtractors("(a | head) && b | tail")).toBeUndefined();
+    });
+
+    it("strips a view after a grouped producer: `(a | head && b) | tail`", () => {
+      // A Subshell as the producer of a single pipeline is exactly what the
+      // extractor consumed, so stripping is faithful.
+      const r = stripTrailingExtractors("(a | head && b) | tail");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["tail"]);
+      expect(r!.removedPipeline).toBe("tail");
+      expect(r!.cleaned).toBe("(a | head && b)");
+    });
+
+    it("strips a view after a subshell producer: `(a; b) | head`", () => {
+      const r = stripTrailingExtractors("(a; b) | head");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe("(a; b)");
+    });
+
+    it("strips a view after a brace-group producer: `{ a; b; } | head`", () => {
+      const r = stripTrailingExtractors("{ a; b; } | head");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe("{ a; b; }");
+    });
+
+    it("leaves a bracketed trailing command untouched: `a | (head)`", () => {
+      expect(stripTrailingExtractors("a | (head)")).toBeUndefined();
+    });
+  });
+
+  // ── Silent prefixes may still be stripped ──────────────────────────
+
+  describe("silent prefix", () => {
+    it("strips after an assignment prefix", () => {
+      const r = stripTrailingExtractors("FOO=bar && npm test | tail -5");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["tail"]);
+      expect(r!.cleaned).toBe("FOO=bar && npm test");
+    });
+
+    it("strips after `cd`", () => {
+      const r = stripTrailingExtractors("cd /tmp && npm test | tail -5");
+      expect(r).toBeDefined();
+      expect(r!.cleaned).toBe("cd /tmp && npm test");
+    });
+
+    it("strips after a `cd` statement separated by `;`", () => {
+      const r = stripTrailingExtractors("cd /tmp; npm test | head -5");
+      expect(r).toBeDefined();
+      expect(r!.cleaned).toBe("cd /tmp; npm test");
+    });
+
+    it("strips after `true`/`test` prefixes", () => {
+      expect(stripTrailingExtractors("true && npm test | tail")).toBeDefined();
+      expect(stripTrailingExtractors("test -f x && npm test | tail")).toBeDefined();
+    });
+
+    it("does not treat `export` as silent (it prints when called bare)", () => {
+      expect(stripTrailingExtractors("export FOO=1 && npm test | tail")).toBeUndefined();
+    });
+
+    it("does not treat a merged-stderr prefix as silent", () => {
+      expect(stripTrailingExtractors("cd /nonexistent 2>&1 && npm test | tail")).toBeUndefined();
+    });
+
+    it("does not treat a grouped prefix as silent", () => {
+      expect(stripTrailingExtractors("(cd /tmp) && npm test | tail")).toBeUndefined();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyExtractor
+// ---------------------------------------------------------------------------
+
+describe("classifyExtractor", () => {
+  it("classifies view extractors", () => {
+    for (const name of VIEW_EXTRACTORS) {
+      expect(classifyExtractor(name)).toBe("view");
+    }
+    expect(classifyExtractor("head")).toBe("view");
+    expect(classifyExtractor("tail")).toBe("view");
+    expect(classifyExtractor("grep")).toBe("view");
+    expect(classifyExtractor("rg")).toBe("view");
+  });
+
+  it("classifies transform extractors", () => {
+    for (const name of TRANSFORM_EXTRACTORS) {
+      expect(classifyExtractor(name)).toBe("transform");
+    }
+    expect(classifyExtractor("sed")).toBe("transform");
+    expect(classifyExtractor("awk")).toBe("transform");
+    expect(classifyExtractor("sort")).toBe("transform");
+    expect(classifyExtractor("jq")).toBe("transform");
+  });
+
+  it("returns undefined for non-extractors", () => {
+    expect(classifyExtractor("npm")).toBeUndefined();
+    expect(classifyExtractor("cat")).toBeUndefined();
+    expect(classifyExtractor("bash")).toBeUndefined();
+    expect(classifyExtractor("")).toBeUndefined();
   });
 });
 

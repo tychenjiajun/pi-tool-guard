@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 import type { PiToolGuardDetails, PiToolGuardTiming } from "./contract.ts";
-import { applyGuardReceipt, type ChildContainer } from "./render.ts";
+import { applyGuardReceipt, shouldRenderGuardReceipt, type ChildContainer } from "./render.ts";
 
 const timing: PiToolGuardTiming = { commandMs: 5_000, extractorMs: 1_500, totalMs: 6_500 };
 
@@ -83,5 +83,35 @@ describe("applyGuardReceipt", () => {
     const text = receipt.render(200).join("\n");
     expect(text).not.toContain("Context saved");
     expect(text).toContain("Took");
+  });
+});
+
+describe("shouldRenderGuardReceipt", () => {
+  it("renders for a slow command whose extractor ran", () => {
+    expect(shouldRenderGuardReceipt({ ...guard, slow: true })).toBe(true);
+  });
+
+  it("skips fast commands so the built-in bash UI is untouched", () => {
+    expect(shouldRenderGuardReceipt({ ...guard, slow: false })).toBe(false);
+    // `slow` unset (older/synthetic records) is treated as fast.
+    expect(shouldRenderGuardReceipt({ ...guard })).toBe(false);
+  });
+
+  it("skips when no extractor ran", () => {
+    expect(
+      shouldRenderGuardReceipt({
+        ...guard,
+        slow: true,
+        timing: { commandMs: 5_000, extractorMs: 0, totalMs: 5_000 },
+      }),
+    ).toBe(false);
+  });
+
+  it("skips no-op projections", () => {
+    expect(shouldRenderGuardReceipt({ ...guard, slow: true, noop: true })).toBe(false);
+  });
+
+  it("skips missing details", () => {
+    expect(shouldRenderGuardReceipt(undefined)).toBe(false);
   });
 });

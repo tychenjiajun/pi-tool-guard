@@ -20,6 +20,16 @@ export interface ChildContainer {
 }
 
 /**
+ * Whether a result should get the guard receipt at all. Fast commands stay
+ * visually identical to the built-in bash tool, and a no-op projection changed
+ * nothing to illustrate, so both are skipped.
+ */
+export function shouldRenderGuardReceipt(guard: PiToolGuardDetails | undefined): boolean {
+  if (!guard || guard.slow !== true || guard.noop === true) return false;
+  return (guard.timing?.extractorMs ?? 0) > 0;
+}
+
+/**
  * Replace the trailing `Took` line with the guard receipt.
  *
  * `hasBuiltInTookLine` must be true only when pi's renderer actually appended

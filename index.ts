@@ -15,7 +15,7 @@ import {
 } from "./aliases.ts";
 import { executeBashGuarded } from "./execute.ts";
 import { readPiToolGuardDetails } from "./contract.ts";
-import { applyGuardReceipt, type ChildContainer } from "./render.ts";
+import { applyGuardReceipt, shouldRenderGuardReceipt, type ChildContainer } from "./render.ts";
 
 // ---------------------------------------------------------------------------
 // extension
@@ -76,10 +76,11 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
           execCtx,
         );
       },
-      // When the guard projected the output it ran an extra extractor after the
-      // command. Pi's built-in renderer still prints one opaque `Took <total>`
-      // line, so replace it with a SoL-Pi-style guard receipt. A no-op
-      // projection shows nothing — pi's plain `Took` line stays.
+      // When the guard projected a slow command it ran an extra extractor
+      // afterwards. Pi's built-in renderer still prints one opaque
+      // `Took <total>` line, so replace it with a SoL-Pi-style guard receipt.
+      // Fast commands and no-op projections show nothing — pi's plain `Took`
+      // line stays.
       renderResult(result, options, theme, context) {
         const renderOriginal = originalRenderResult as NonNullable<typeof originalRenderResult>;
         const component = renderOriginal(
@@ -91,14 +92,15 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
         if (options.isPartial) return component;
 
         const guard = readPiToolGuardDetails(result.details);
-        const timing = guard?.timing;
-        if (!guard || !timing || timing.extractorMs <= 0 || guard.noop) return component;
+        // Fast commands stay visually identical to the built-in bash tool: no
+        // guard Notice and no receipt. Only a slow run justifies the extra UI.
+        if (!shouldRenderGuardReceipt(guard)) return component;
 
         applyGuardReceipt(
           component as unknown as ChildContainer,
           theme,
-          guard,
-          timing,
+          guard!,
+          guard!.timing!,
           context.state?.startedAt !== undefined,
         );
         return component;

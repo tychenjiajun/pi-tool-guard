@@ -35,25 +35,38 @@ When the LLM calls a tool with wrong field names, the extension normalizes them 
 
 When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash commands, the extension strips them and applies the extractor intelligently.
 
-**Three-case strategy:**
+**Four-case strategy:**
 
 | Scenario | UI Notification | LLM Response |
 |---|---|---|
-| Fast command (< 10s), truncated | `Filtered via \`head -5\` — the large output was piped from its temp file.` | Filtered result only |
-| Fast command (< 10s), not truncated | `Filtered via \`head -5\` — full output was small enough to pipe.` | Filtered result only |
-| Slow command (truncated or not) | `The full output is above...` | Result + `This is a slow command. Avoid re-running...` |
+| Fast command (< 10s), truncated | — (none; identical to the built-in bash tool) | Filtered result only |
+| Fast command (< 10s), not truncated | — (none; identical to the built-in bash tool) | Filtered result only |
+| Slow command (truncated or not) | `The full output is above...` + guard receipt | Projected view + **Full-Output Readback** notice (inlines the saved path and says to read it instead of re-running) |
+| Error (non-zero exit) | `Filtered via ...` | Projected text + `[Command exited with code N. Full output: <path>]` |
 
-> **Notification format**: The UI notification shows both the full original command and the extracted pipeline. Example: `Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.`
+> **Notification format**: The UI notification shows both the full original command and the extracted pipeline. Example: `Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.` Fast commands show no notice and no receipt, so they look exactly like the built-in tool.
 
 **Example:** `vitest run | tail -n 10`
-- If vitest finishes in < 10s → run `tail` on result (or full output file if truncated), notify UI
-- If vitest is slow → return result as-is, notify UI, append slow-command hint to LLM
+- If vitest finishes in < 10s → run `tail` on result (or full output file if truncated), no UI
+- If vitest is slow → persist the full, unextracted output to a temp file, return the projected view, notify UI, append a Full-Output Readback notice (path + "read it instead of re-running") to the LLM
+- If vitest exits non-zero → recover the output and `Full output: <path>` pointer from the error, apply `tail` to the available full output, throw an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`
 
-**Detected extractors:** `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `less`, `more`, `column`, `jq`, `yq`, `tr`
+**Extractor split:** Not all trailing pipeline commands are stripped. The guard distinguishes:
 
-All trailing extractors are stripped: `npm test | grep FAIL | head -5` → strips `grep FAIL | head -5`
+- **View extractors** (safe to strip; the guard re-applies them): `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more`
+- **Transform extractors** (NOT stripped): `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `column`, `jq`, `yq`, `tr`
 
-**Timing split:** pi's built-in renderer prints one opaque `Took <total>` line. When the guard ran a stripped extractor (so the total includes guard's projection), that line is replaced with a SoL-Pi-style receipt:
+If the trailing pipeline contains any transform extractor, the guard leaves the command completely unchanged and runs it as-is (so the shell applies the transform). Stripping a transform would silently drop the transformation the user asked for.
+
+Only view extractors are stripped: `npm test | grep FAIL | head -5` → strips `grep FAIL | head -5`
+
+**Multi-statement safety:** stripping is only attempted when the trailing view's stdout is the whole command's stdout. A lone pipeline, or one preceded by a **silent prefix** (`cd`, bare assignments, `true`, `:`, `test`, `[`, without redirects — e.g. `cd /tmp && npm test | tail`), is eligible. Anything else is left untouched: for `a && b | head`, re-applying `head` after stripping would return the head of `a`, not of `b`. This covers `;`/`&&`/`||` lists, grouped `(...)`/`{ ...; }` commands, and backgrounded earlier statements.
+
+**Exit codes:** The extractor helpers treat exit codes 0 and 1 as success and accept empty stdout. So `cmd | grep no-match` (grep exits 1) yields an empty projection, not a "failed extractor" fallthrough. Previously this was misclassified as a slow command.
+
+**Slow commands:** For slow commands (≥ 10s), the guard persists the full, unextracted output to a temp file even when it is below pi's 50KB/2000-line truncation limit, and returns the projected view (outcome `projection-applied`) instead of dumping the entire output. The LLM notice inlines that file path and tells the agent to read it on demand — e.g. the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — rather than re-running the expensive command. The guard never replays a previous run; every invocation executes the command again.
+
+**Timing split:** pi's built-in renderer prints one opaque `Took <total>` line. For a **slow** command where the guard ran a stripped extractor, that line is replaced with a SoL-Pi-style receipt. Fast commands keep pi's plain line — no receipt, no UI:
 
 ```
 🛡 pi-tool-guard · grep FAIL | head -5
@@ -61,9 +74,9 @@ All trailing extractors are stripped: `npm test | grep FAIL | head -5` → strip
    Took 6.5s  ██████████████░░░░  cmd 5.0s · filter 1.5s
 ```
 
-The bar is proportional — accent `█` for the cleaned command, warning `░` for the guard's extractor. Slow commands run no extractor, so their line is left untouched.
+The bar is proportional — accent `█` for the cleaned command, warning `░` for the guard's extractor.
 
-**Silent no-op:** when applying the extractor leaves the output unchanged (e.g. `tail -20` on a 2-line result), the guard shows no UI notice and no receipt — pi's plain `Took` line stays. Notices and receipts only fire when the projection actually changed the content.
+**Silent no-op:** when applying the extractor leaves the output unchanged (e.g. `tail -20` on a 2-line result), the guard shows no UI notice and no receipt — pi's plain `Took` line stays. Notices and receipts only fire when the projection actually changed the content. No-op detection is only computed for inline (non-truncated) projections; for projections from a saved file the guard cannot cheaply compare against the full text, so it does not claim a no-op.
 
 ---
 
@@ -75,13 +88,14 @@ Alias normalization uses `prepareArguments` on the overridden `edit`/`write`/`re
 
 Bash runs a custom `execute` override:
 
-1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing extractors. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
+1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing **view** extractors (transform extractors are left in place). It only strips a lone final pipeline or one behind a silent prefix; multi-statement, grouped, and backgrounded commands are passed through unchanged. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
 2. The cleaned command is run through the original built-in execute.
 3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
 4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
-5. If slow (truncated or not) → returns result as-is with notice
+5. If slow (truncated or not) → persists the full, unextracted output to a temp file, runs the extractor, returns the projected view + Full-Output Readback notice
+6. If the command exits non-zero → recovers the output and `Full output: <path>` pointer from the error, applies the stripped (view) extractor to the available full output, and throws an error whose message is the projected text followed by a bracket note preserving the exit code and full-output path
 
-No error recovery, no session scanning.
+No session scanning. Error path: a thrown error cannot carry `details`, so no `piToolGuard` contract is published on the error path — this is a documented limitation.
 
 ---
 
@@ -109,12 +123,14 @@ interface PiToolGuardDetails {
     outputLines: number;
     outputBytes: number;
   };
-  noop?: boolean;            // projection left the output unchanged
+  noop?: boolean;            // projection left the output unchanged (inline projections only)
+  slow?: boolean;            // cleaned command ran >= 10s; only slow runs show guard UI
 }
 ```
 
-- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
+- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **always keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
 - `outcome: "full-output"` — `content` is the cleaned command's full output and `details.fullOutputPath` is kept.
+- `slow` — optional boolean; `true` means the cleaned command ran for at least `FAST_THRESHOLD_MS`. Only slow runs surface guard UI (Notice, footer status, receipt); fast commands look exactly like the built-in bash tool.
 - No extractors stripped → no record; `details` is left untouched.
 
 The contract is additive and versioned. Consumers must parse with `readPiToolGuardDetails` (exported from `contract.ts`) and fall back to the inline content for unknown versions.
