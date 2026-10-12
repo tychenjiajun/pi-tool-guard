@@ -60,11 +60,17 @@ pi install npm:pi-tool-guard
 
 仅剥离视图提取器：`npm test | grep FAIL | head -5` → 剥离 `grep FAIL | head -5`
 
-**多语句安全：** 仅当尾部视图的 stdout 就是整条命令的 stdout 时才尝试剥离。单独的管道，或前面只有**静默前缀**（`cd`、裸赋值、`true`、`:`、`test`、`[`，且无重定向——例如 `cd /tmp && npm test | tail`）的管道，才有资格。其他情况一律保持原样：对于 `a && b | head`，剥离后再重新应用 `head` 会返回 `a` 的前几行，而不是 `b` 的。这覆盖了 `;`/`&&`/`||` 语句列表、分组 `(...)`/`{ ...; }` 命令，以及被后台化的前置语句。
+**多语句安全：** 仅当尾部视图的 stdout 就是整条命令的 stdout 时才尝试剥离。单独的管道，或周围语句都能被 guard 交代清楚的管道，才有资格。与窗口共享脚本 stdout 但在窗口之外的语句——非静默前缀（`cd /tmp && echo "=== build ===" && npm test | tail`）或尾部的 `; echo done`——会被**外提（hoist）**到临时旁路文件（`{ echo "=== build ==="\n} >> '<sink>' 2>&1`），让 shell 逐字节保留它们，再由 guard 把这段文本接回投影前后。可证明静默的前缀（`cd`、裸赋值、`true`、`:`、`test`、`[`，且无重定向）不需要旁路文件。仍然保持原样的有：自带提取器的语句（`a | head && b | tail`）、后台化语句、here-document，以及——尤其重要的——读取上一条状态的尾部语句：
+
+```bash
+printf 'a\n' | grep nomatch; echo "R=$?"   # bash 输出 R=1
+```
+
+剥离 `grep` 会让 `$?` 观察到 `printf`（输出 `R=0`），而 guard 只能在命令*执行完*之后才知道视图的退出码，所以它宁可整条命令原样透传，也不输出假信息。前缀可以安全外提，是因为那里的 `$?` 指的是它之前运行的命令，guard 从未触碰。
 
 **快速路径保真度：** 对于快速命令，guard 执行*清洗后的*命令，并将被剥离的提取器重新应用到 pi 格式化后的结果上，而非运行原生的 `cmd | extractor` 管道。在常见场景下这是忠实的，但存在三个已接受的、已记录的偏差：guard 投影前 pi 会将 stdout 与 stderr 合并，因此被剥离的 `grep`/`head` 也会过滤 stderr 行（真实 shell 管道不会这样）；guard 会修剪投影的尾部空白；运行期间 pi 的实时 `onUpdate` 流显示的是清洗后命令的未过滤输出——只有返回的内容是投影。这些是已知的局限性，并非缺陷。
 
-**退出码：** 提取器退出码现在会透传，与 pi 自身的 `cmd | extractor` 行为一致：如果重新应用的提取器以非零退出码结束（例如 `cmd | grep no-match`，其中 grep 退出码为 1），命令会以 `Command exited with code 1` 失败，而不是返回空成功结果。慢速命令的错误信息会追加 `Full output: <path>`。
+**退出码：** 提取器退出码现在会透传，与 pi 自身的 `cmd | extractor` 行为一致：如果重新应用的提取器以非零退出码结束（例如 `cmd | grep no-match`，其中 grep 退出码为 1），命令会以 `Command exited with code 1` 失败，而不是返回空成功结果。慢速命令的错误信息会追加 `Full output: <path>`。这只在提取器是命令最后一条命令时成立——若后面还有语句（`cmd | grep x; echo done`），bash 会以*那条*语句的退出码结束，因此 guard 会返回投影而不是抛错。
 
 **空输出：** 空的内联投影渲染为 `(no output)`，与 pi 自身的空结果渲染一致。
 
@@ -92,7 +98,7 @@ pi install npm:pi-tool-guard
 
 Bash 使用自定义 `execute` 覆盖：
 
-1. `execute` 使用 [unbash](https://github.com/nicolo-ribaudo/unbash) 解析命令，剥离尾部**视图**提取器（转换提取器保留不变）。它仅剥离单独的最后一条管道，或位于静默前缀之后的管道；多语句、分组和后台化命令原样传递。剥离发生在这里（而非 `prepareArguments`），以便 `tool_result.input.command` 保留用户编写的原始命令。
+1. `execute` 使用 [unbash](https://github.com/nicolo-ribaudo/unbash) 解析命令，剥离尾部**视图**提取器（转换提取器保留不变）。它仅剥离单独的最后一条管道，或周围语句都能被交代清楚的管道：可证明静默的语句原地保留，非静默语句被**外提到**临时旁路 sink（`{ <text>\n} >> '<sink>' 2>&1`），其文本随后被接回投影前后。自带提取器的语句、后台化语句、here-document，以及尾部的状态读取（`$?`/`PIPESTATUS`）会让整条命令原样传递。剥离发生在这里（而非 `prepareArguments`），以便 `tool_result.input.command` 保留用户编写的原始命令。
 2. 剥离后的命令通过原始内置 execute 运行
 3. 如果快速（< 10秒）且已截断 → 通过 `pi.exec` 在完整输出文件上运行提取器
 4. 如果快速（< 10秒）且未截断 → 通过 `pi.exec` 将结果通过管道传递给提取器

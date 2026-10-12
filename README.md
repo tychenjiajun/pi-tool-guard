@@ -60,11 +60,17 @@ If the trailing pipeline contains any transform extractor, the guard leaves the 
 
 Only view extractors are stripped: `npm test | grep FAIL | head -5` → strips `grep FAIL | head -5`
 
-**Multi-statement safety:** stripping is only attempted when the trailing view's stdout is the whole command's stdout. A lone pipeline, or one preceded by a **silent prefix** (`cd`, bare assignments, `true`, `:`, `test`, `[`, without redirects — e.g. `cd /tmp && npm test | tail`), is eligible. Anything else is left untouched: for `a && b | head`, re-applying `head` after stripping would return the head of `a`, not of `b`. This covers `;`/`&&`/`||` lists, grouped `(...)`/`{ ...; }` commands, and backgrounded earlier statements.
+**Multi-statement safety:** stripping is only attempted when the trailing view's stdout is the whole command's stdout. A lone pipeline, or one surrounded by statements the guard can account for, is eligible. Statements that share the script's stdout but sit outside the window — a non-silent prefix (`cd /tmp && echo "=== build ===" && npm test | tail`) or a trailing `; echo done` — are **hoisted** into a temp side-channel file (`{ echo "=== build ==="\n} >> '<sink>' 2>&1`) so the shell preserves every byte, and the guard re-attaches that text around the projection. A prefix that is provably silent (`cd`, bare assignments, `true`, `:`, `test`, `[`, without redirects) needs no sink at all. What is still left untouched: a statement that carries its own extractor (`a | head && b | tail`), a backgrounded statement, a here-document, and — importantly — a trailing statement that reads the previous status:
+
+```bash
+printf 'a\n' | grep nomatch; echo "R=$?"   # bash prints R=1
+```
+
+Stripping `grep` would make `$?` observe `printf` (printing `R=0`), and the guard only learns the view's status *after* the command has run, so it passes the command through untouched rather than printing a lie. Prefixes are safe to hoist because `$?` there refers to whatever ran before them, which the guard never touches.
 
 **Fast-path fidelity:** for fast commands the guard executes the *cleaned* command and re-applies the stripped extractor to pi's formatted result, rather than running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs.
 
-**Exit codes:** Extractor exit codes are propagated, matching pi's own `cmd | extractor` behavior: a stripped pipeline whose re-applied extractor exits non-zero (e.g. `cmd | grep no-match`, where grep exits 1) fails with `Command exited with code 1`, instead of returning an empty success. On slow commands the error appends `Full output: <path>`.
+**Exit codes:** Extractor exit codes are propagated, matching pi's own `cmd | extractor` behavior: a stripped pipeline whose re-applied extractor exits non-zero (e.g. `cmd | grep no-match`, where grep exits 1) fails with `Command exited with code 1`, instead of returning an empty success. On slow commands the error appends `Full output: <path>`. That only holds while the extractor is the command's last command — with a following statement (`cmd | grep x; echo done`) bash exits with *that* statement's status, so the guard projects instead of throwing.
 
 **Empty output:** an empty inline projection renders as `(no output)`, matching pi's own empty-result rendering.
 
@@ -92,7 +98,7 @@ Alias normalization uses `prepareArguments` on the overridden `edit`/`write`/`re
 
 Bash runs a custom `execute` override:
 
-1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing **view** extractors (transform extractors are left in place). It only strips a lone final pipeline or one behind a silent prefix; multi-statement, grouped, and backgrounded commands are passed through unchanged. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
+1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing **view** extractors (transform extractors are left in place). It only strips a lone final pipeline or one surrounded by statements it can account for: provably silent ones stay in place, and non-silent ones are **hoisted** into a temp side-channel sink (`{ <text>\n} >> '<sink>' 2>&1`) whose text is re-attached around the projection. Statements carrying their own extractor, backgrounded statements, here-documents, and trailing status readers (`$?`/`PIPESTATUS`) pass the whole command through unchanged. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
 2. The cleaned command is run through the original built-in execute.
 3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
 4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`

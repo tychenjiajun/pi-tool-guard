@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, AgentToolResult, BashToolDetails } from "@earendil-works/pi-coding-agent";
 import {
   stripTrailingExtractors,
+  type SideChannelSinks,
+  type StripResult,
 } from "./pipeline.ts";
 import {
   FAST_THRESHOLD_MS,
@@ -9,6 +11,11 @@ import {
   buildNotice,
   buildSlowReadbackNotice,
   isProjectionNoop,
+  joinOutputStreams,
+  createSideChannelPath,
+  readSideChannel,
+  removeSideChannel,
+  resetSideChannel,
   runExtractorOnFile,
   runExtractorOnText,
   persistFullOutput,
@@ -139,6 +146,10 @@ function throwExtractorFailure(
  * inline), and rethrow a new Error whose message is the projected text plus a
  * `[Command exited with code N. Full output: <path>]` suffix. If the error is
  * not a bash exit-code error (abort/timeout), rethrow it unchanged.
+ *
+ * `hoisted` carries the side-channel text of hoisted statements, which is
+ * re-attached around the projection so the thrown message still contains every
+ * byte the user's command printed.
  */
 export async function rethrowGuardedError(
   ctx: ExecuteContext,
@@ -146,6 +157,7 @@ export async function rethrowGuardedError(
   originalCommand: string,
   err: unknown,
   commandMs?: number,
+  hoisted?: { prefix?: string; suffix?: string },
 ): Promise<never> {
   const parsed = parseBashError(err);
   if (parsed.exitCode === undefined) throw err;
@@ -154,7 +166,13 @@ export async function rethrowGuardedError(
     ? await runExtractorOnFile(ctx.pi, parsed.fullOutputPath, stripped.removedPipeline)
     : await runExtractorOnText(ctx.pi, parsed.text, stripped.removedPipeline);
 
-  const body = extracted !== undefined ? extracted.text : parsed.text;
+  const body = joinOutputStreams(
+    hoisted?.prefix,
+    extracted !== undefined ? extracted.text : parsed.text,
+    hoisted?.suffix,
+    // Hoisted sinks end with the newline the shell wrote; drop it so the bracket
+    // sits exactly two newlines below the body, as on the non-hoisted path.
+  ).replace(/\n+$/, "");
   if (extracted !== undefined) {
     // A slow failing command deserves the "do NOT re-run" wording; only the
     // caller knows how long the cleaned command ran, so `commandMs` is passed
@@ -169,6 +187,52 @@ export async function rethrowGuardedError(
   if (parsed.fullOutputPath) suffix.push(`Full output: ${parsed.fullOutputPath}`);
   throw new Error(`${body}\n\n[${suffix.join(". ")}]`);
 }
+
+// ---------------------------------------------------------------------------
+// Side channels (hoisting)
+// ---------------------------------------------------------------------------
+
+/**
+ * The two side-channel sink files a hoisted command needs. Hoisted statements
+ * append their stdout+stderr there instead of the command's stdout, and the
+ * guard re-attaches that text around the projection.
+ */
+interface SideChannels {
+  sinks: SideChannelSinks;
+  text(): { prefix: string; suffix: string };
+  dispose(): void;
+}
+
+/**
+ * Open both sinks up front (`resetSideChannel` truncates them) so the shell's
+ * `>>` can never fail mid-run and short-circuit an `&&` chain — that would skip
+ * the user's real command. Returns undefined when the OS temp dir is unusable,
+ * in which case hoisting is skipped and the command is passed through.
+ */
+function openSideChannels(): SideChannels | undefined {
+  const prefix = createSideChannelPath();
+  const suffix = createSideChannelPath();
+  if (!prefix || !suffix || !resetSideChannel(prefix) || !resetSideChannel(suffix)) {
+    if (prefix) removeSideChannel(prefix);
+    if (suffix) removeSideChannel(suffix);
+    return undefined;
+  }
+  return {
+    sinks: { prefix, suffix },
+    text: () => ({ prefix: readSideChannel(prefix), suffix: readSideChannel(suffix) }),
+    dispose: () => {
+      removeSideChannel(prefix);
+      removeSideChannel(suffix);
+    },
+  };
+}
+
+/**
+ * Hoisting is only ever needed when a second statement (or an `AndOr` chain)
+ * surrounds the pipeline, which requires one of these separators. Keeps the
+ * common single-pipeline case from paying for two temp files.
+ */
+const MAY_HOIST_RE = /[;&\n]|\|\|/;
 
 // ---------------------------------------------------------------------------
 // Core execute logic
@@ -189,23 +253,92 @@ export async function executeBashGuarded(
     return ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
   }
 
-  const stripped = stripTrailingExtractors(originalCommand);
+  // Strip without sinks first: that is the cheap, side-effect-free path, and it
+  // also keeps the pre-hoisting behaviour byte-identical for every command that
+  // does not need a side channel (`echo a && b | head` still passes through).
+  let stripped = stripTrailingExtractors(originalCommand);
+  let channels: SideChannels | undefined;
+  if (!stripped && MAY_HOIST_RE.test(originalCommand)) {
+    channels = openSideChannels();
+    if (channels) stripped = stripTrailingExtractors(originalCommand, channels.sinks);
+  }
   if (!stripped) {
+    channels?.dispose();
     return ctx.originalExecute(toolCallId, params, signal, onUpdate, execCtx);
   }
+
+  try {
+    return await runGuardedBash(
+      ctx,
+      toolCallId,
+      input,
+      originalCommand,
+      stripped,
+      channels,
+      signal,
+      onUpdate,
+      execCtx,
+    );
+  } finally {
+    channels?.dispose();
+  }
+}
+
+async function runGuardedBash(
+  ctx: ExecuteContext,
+  toolCallId: string,
+  input: Record<string, unknown>,
+  originalCommand: string,
+  stripped: StripResult,
+  channels: SideChannels | undefined,
+  signal: AbortSignal | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onUpdate: any,
+  execCtx: unknown,
+): Promise<ToolResult> {
+  // Text hoisted out of the projection window. The sinks only fill up once the
+  // command has run, so they are read *after* `originalExecute` returns (or
+  // throws) — and before the caller's `finally` disposes them.
+  let hoisted = { prefix: "", suffix: "" };
+  const readHoisted = (): void => {
+    hoisted = channels?.text() ?? { prefix: "", suffix: "" };
+  };
+  const hasHoisted = (): boolean => hoisted.prefix.length > 0 || hoisted.suffix.length > 0;
+  /**
+   * Re-attach hoisted output around a projection, in the order the shell would
+   * have written it. Without hoisting this is the identity, so every non-hoisted
+   * path stays byte-identical to the pre-side-channel behaviour.
+   */
+  const assemble = (window: string): string =>
+    hasHoisted()
+      ? joinOutputStreams(
+          hoisted.prefix,
+          window === EMPTY_OUTPUT_PLACEHOLDER ? undefined : window,
+          hoisted.suffix,
+        )
+      : window;
 
   // Execute the cleaned command through a copy, leaving the caller's args
   // untouched. `tool_result.input.command` (and Pi's tool-call display) then
   // keeps the command the user actually wrote, which is what the SoL-Pi
   // evidence-preserving reducer hashes and cites in its receipt.
-  const cleanedParams = { ...input, command: stripped.cleaned };
+  const cleanedParams = { ...input, command: stripped.execCommand };
 
   const commandStart = Date.now();
   let result: ToolResult;
   try {
     result = await ctx.originalExecute(toolCallId, cleanedParams, signal, onUpdate, execCtx);
+    readHoisted();
   } catch (err) {
-    return await rethrowGuardedError(ctx, stripped, originalCommand, err, Date.now() - commandStart);
+    readHoisted();
+    return await rethrowGuardedError(
+      ctx,
+      stripped,
+      originalCommand,
+      err,
+      Date.now() - commandStart,
+      hoisted,
+    );
   }
   const commandMs = Date.now() - commandStart;
 
@@ -253,7 +386,13 @@ export async function executeBashGuarded(
     // `cmd | extractor` pipeline would fail with the last command's exit code
     // (no pipefail), so mirror that: exit 1 from `grep`/`rg` on no match is a
     // failure here too, not a silent empty success.
-    if (extracted.code !== 0) {
+    //
+    // That only holds while the extractor *is* the command's last command. When
+    // a statement runs after the window (`a | grep x; echo "R=$?"`) bash exits
+    // with that statement's status — `originalExecute` returning normally is the
+    // proof the script succeeded — so the extractor's own status (which the
+    // hoisted suffix reports) must not be turned into a command failure.
+    if (extracted.code !== 0 && !stripped.hasFollowingStatement) {
       if (isSlow) {
         const uiNotice = buildNotice(stripped.removedPipeline, originalCommand, "slow");
         ctx.ctx.ui.notify(uiNotice, "info");
@@ -278,8 +417,11 @@ export async function executeBashGuarded(
         ? EMPTY_OUTPUT_PLACEHOLDER
         : extracted.text;
 
-      // F5: noop detection — only meaningful for inline (non-file) projections
+      // F5: noop detection — only meaningful for inline (non-file) projections.
+      // A hoisted statement means the returned content *did* change relative to
+      // the executed command, so the guard is never a no-op there.
       const noop =
+        !hasHoisted() &&
         inlineSource !== undefined &&
         isProjectionNoop(projectedText, isPlaceholderProjection ? EMPTY_OUTPUT_PLACEHOLDER : inlineSource);
       const projection: PiToolGuardProjection | undefined =
@@ -311,7 +453,8 @@ export async function executeBashGuarded(
         );
       }
 
-      const text = notices.length ? `${projectedText}\n\n${notices.join("\n\n")}` : projectedText;
+      const body = assemble(projectedText);
+      const text = notices.length ? `${body}\n\n${notices.join("\n\n")}` : body;
       return withGuardDetails(
         {
           content: [{ type: "text" as const, text }],
@@ -341,9 +484,12 @@ export async function executeBashGuarded(
   const llmNotice = isSlow
     ? buildSlowReadbackNotice(originalCommand, sourcePath)
     : "The projection could not be applied; showing the full output.";
+  const fullBody = assemble(resultText(result));
   return withGuardDetails(
     {
-      content: [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
+      content: hasHoisted()
+        ? [{ type: "text" as const, text: `${fullBody}\n\n${llmNotice}` }]
+        : [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
       details: resultWithPointer.details,
     },
     guardRecord(

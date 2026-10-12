@@ -9,12 +9,28 @@ A trailing command in a bash pipeline that filters or transforms output. Two kin
 _Avoid_: filter, pipe command
 
 **Pipeline Stripping**:
-Removing trailing **View Extractors** from a bash command so the full output is available for further processing. **Transform Extractors** are left in place. Only the **final pipeline** is eligible, and only when its stdout is the whole command's stdout: with `;`/`&&`/`||` the stripped extractor would also filter the earlier statements, so the command is left untouched unless the entire prefix is a **Silent Prefix**. Redirections (`<`, `>`, `2>&1`) stay attached to their command — an input redirect on the cleaned command is kept, and a redirect on a stripped view travels with it in the removed pipeline. A final statement that is **backgrounded** with `&` is never stripped (its output is not synchronously capturable, and slicing out the view would drop the `&`, silently foregrounding the job).
+Removing trailing **View Extractors** from a bash command so the full output is available for further processing. **Transform Extractors** are left in place. Only the **final pipeline** is eligible, and only when its stdout is the whole command's stdout: with `;`/`&&`/`||` the stripped extractor would also filter the earlier statements, so the command is left untouched unless every other statement is a **Silent Prefix**, a **Hoisted Statement**, or a **Status-Reading Statement** (which is refused outright). Redirections (`<`, `>`, `2>&1`) stay attached to their command — an input redirect on the cleaned command is kept, and a redirect on a stripped view travels with it in the removed pipeline. A final statement that is **backgrounded** with `&` is never stripped (its output is not synchronously capturable, and slicing out the view would drop the `&`, silently foregrounding the job).
 _Avoid_: pipeline trimming, command rewriting
 
 **Silent Prefix**:
-The statements or AndOr members that run before a command's final pipeline (`cd /tmp && npm test | tail`, `FOO=bar; npm test | head`). They share the script's stdout, so stripping the final extractor is only faithful when the whole prefix provably writes nothing to stdout. The allowlist is tiny and structural: `cd`, `true`, `:`, `test`, `[`, and bare assignments — with no redirects (a `2>&1` could merge stderr into the stream the extractor reads). Grouped (`(...)`, `{ ...; }`) and backgrounded prefixes are never assumed silent.
+The statements or AndOr members that run before a command's final pipeline (`cd /tmp && npm test | tail`, `FOO=bar; npm test | head`). They share the script's stdout, so stripping the final extractor is only faithful when the whole prefix provably writes nothing to stdout. The allowlist is tiny and structural: `cd`, `true`, `:`, `test`, `[`, and bare assignments — with no redirects (a `2>&1` could merge stderr into the stream the extractor reads). Grouped (`(...)`, `{ ...; }`) and backgrounded prefixes are never assumed silent. A prefix that is neither **silent** nor a **Hoisted Statement** blocks stripping entirely. A *trailing* statement gets the same treatment — silent ones simply stay in place.
 _Avoid_: quiet prefix, empty prefix
+
+**Hoisted Statement**:
+A statement or AndOr member that shares the command's stdout with the projection window but is neither provably silent nor part of it. The guard redirects it into a **Side Channel** (`{ <text>\n} >> '<sink>' 2>&1`) so the shell preserves every byte while the extractor only ever sees the window: `cd x && echo "=== build ===" && npm test | tail -12` becomes `cd x && { echo "=== build ===\n} >> '<sink>' 2>&1 && npm test`, and the guard re-attaches the sink's text before the projection. Hoisting needs **Side Channel** files; without them (or when a statement cannot be hoisted faithfully) the command is left completely untouched, which is what keeps the pre-hoisting behaviour byte-identical for every command that does not need one. Statements are never hoisted when they carry a **View Extractor** of their own (the shell would apply one extractor while the guard applies another), when they are **backgrounded**, or when they contain a here-document (its body lives outside the statement's span). `{ ...; }` runs in the *current* shell — unlike `( ... )` — so a hoisted `cd`/assignment keeps its effect on the window after it, a leading redirection does not reset `$?`, and `&&`/`||` short-circuiting is preserved (`cd /missing && echo hi && npm test | tail` still skips the pipeline).
+_Avoid_: side channel statement, rescued statement
+
+**Side Channel**:
+A `pi-bash-guard-sink-<hex>.out` temp file that a **Hoisted Statement** appends its stdout+stderr to. Opened (and truncated) by the guard before the run so the shell's `>>` can never fail and short-circuit an `&&` chain; read once the command has finished, re-attached around the projection, and always removed. Sinks are never evidence: unlike `pi-bash-guard-*.log` they are never published as a **Source Path**, and only a stale sweep (`FULL_OUTPUT_TTL_MS`) can outlive a crashed run.
+_Avoid_: temp file, buffer
+
+**Status-Reading Statement**:
+A statement after the projection window whose text reads `$?`, `${?}`, or `PIPESTATUS`. Stripping the extractor changes that status — the removed view is no longer the last command of the pipeline — and the guard only learns the view's own status *after* the command has run, so it cannot reproduce it. Such a command is passed through completely untouched rather than printing a lie: `printf 'a\n' | grep nomatch; echo "R=$?"` prints `R=1` in bash, while the stripped form would print `R=0`. Prefixes are unaffected — they read the status of whatever ran before them, which the guard never touches.
+_Avoid_: exit-code reader, $? consumer
+
+**Exit-Status Owner**:
+The last statement of a command, which owns the shell's exit status. Stripping an extractor behind one means the extractor's non-zero exit no longer fails the script (`a | grep x; echo done` exits 0 in bash), so the guard must not report `Command exited with code 1` for it. Recorded on the plan as `hasFollowingStatement`.
+_Avoid_: exit code owner, final status
 
 **Fast Command**:
 A bash command that completes in under 10 seconds (configurable via `FAST_THRESHOLD_MS`).
@@ -87,7 +103,8 @@ _Avoid_: empty filter, redundant projection
 ## Relationships
 
 - A **Pipeline** contains one or more commands, with optional **View Extractors** at the end (**Transform Extractors** are never stripped)
-- A **Pipeline** is stripped only when it is the whole command, or when every statement before it is a **Silent Prefix**; otherwise the command is left untouched
+- A **Pipeline** is stripped only when it is the whole command, or when every other statement is a **Silent Prefix**, a **Hoisted Statement**, or the **Exit-Status Owner**; a **Status-Reading Statement** after the window, an extractor inside a **Hoisted Statement**, a here-document, or a backgrounded statement leaves the command untouched
+- **Hoisted Statements** shave their output into a **Side Channel** and the guard re-attaches it around the projection, so stdout, `&&` short-circuiting, `cd` effects and `$?` all stay exactly as the shell would have produced them
 - **Fast Commands** have view extractors piped through them (or run on `fullOutputPath` if truncated)
 - **Slow Commands** persist the full, unextracted output to a file, run the view extractor, and return the projected view + **Full-Output Readback** as an **LLM Notice**
 - **Error (Non-zero Exit)** recovers output from the thrown error, applies the view extractor, and throws a projected error with exit code + path
@@ -110,6 +127,9 @@ _Avoid_: empty filter, redundant projection
 >
 > **Dev:** "And if it finishes in 2 seconds?"
 > **Domain expert:** "**Projection Applied**: the guard runs `tail` on the result as a fallback, but keeps `fullOutputPath`, so a reducer that understands the contract (or just reads **Source Path**) can override guard's projection with an evidence-checked receipt for the full log."
+>
+> **Dev:** "And `cd app && echo \"=== build ===\" && npm test | tail -12; echo \"R=$?\"`?"
+> **Domain expert:** "The `echo` and the `&&` chain used to block stripping, because re-applying `tail` would filter their output too. Now the **Hoisted Statements** go into **Side Channels** and the guard re-attaches them, so a **Hoisted Statement** no longer blocks anything. The `echo \"R=$?\"` is different: it is a **Status-Reading Statement**, and stripping `tail` would make `$?` observe `npm test` instead of `tail` — so that whole command is still passed through untouched. Move the status read out of the command (or drop it) and the guard handles the rest."
 
 ## Flagged ambiguities
 

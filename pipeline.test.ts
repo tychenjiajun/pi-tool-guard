@@ -20,6 +20,10 @@ describe("stripTrailingExtractors", () => {
       const r = stripTrailingExtractors("npm run build 2>&1 | tail -20");
       expect(r).toEqual({
         cleaned: "npm run build 2>&1",
+        execCommand: "npm run build 2>&1",
+        hoistedPrefix: [],
+        hoistedSuffix: [],
+        hasFollowingStatement: false,
         removedNames: ["tail"],
         removedPipeline: "tail -20",
       });
@@ -48,6 +52,10 @@ describe("stripTrailingExtractors", () => {
       const r = stripTrailingExtractors("find src -type f -name '*.ts' | head -20");
       expect(r).toEqual({
         cleaned: "find src -type f -name '*.ts'",
+        execCommand: "find src -type f -name '*.ts'",
+        hoistedPrefix: [],
+        hoistedSuffix: [],
+        hasFollowingStatement: false,
         removedNames: ["head"],
         removedPipeline: "head -20",
       });
@@ -146,6 +154,10 @@ describe("stripTrailingExtractors", () => {
       const r = stripTrailingExtractors("npm test | grep FAIL | head -5");
       expect(r).toEqual({
         cleaned: "npm test",
+        execCommand: "npm test",
+        hoistedPrefix: [],
+        hoistedSuffix: [],
+        hasFollowingStatement: false,
         removedNames: ["grep", "head"],
         removedPipeline: "grep FAIL | head -5",
       });
@@ -641,5 +653,129 @@ describe("extractFullOutputPath", () => {
 
   it("returns undefined for empty string", () => {
     expect(extractFullOutputPath("")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hoisted statements (side channels)
+// ---------------------------------------------------------------------------
+
+describe("stripTrailingExtractors hoisting", () => {
+  const sinks = { prefix: "/tmp/pfx.out", suffix: "/tmp/sfx.out" };
+
+  it("hoists a non-silent AndOr prefix", () => {
+    const command =
+      'cd /Users/chenjiajun/projects/gf-trader-app && echo "=== tscheck ===" && ' +
+      'timeout 900 npm exec flh -- --tscheck --only-changes 2>&1 | tail -12';
+    const r = stripTrailingExtractors(command, sinks)!;
+
+    // `cleaned` stays sink-free: it is what the contract publishes.
+    expect(r.cleaned).toBe(
+      'cd /Users/chenjiajun/projects/gf-trader-app && echo "=== tscheck ===" && ' +
+        'timeout 900 npm exec flh -- --tscheck --only-changes 2>&1',
+    );
+    expect(r.execCommand).toBe(
+      "cd /Users/chenjiajun/projects/gf-trader-app && " +
+        `{ echo "=== tscheck ==="\n} >> '${sinks.prefix}' 2>&1 && ` +
+        "timeout 900 npm exec flh -- --tscheck --only-changes 2>&1",
+    );
+    expect(r.removedPipeline).toBe("tail -12");
+    expect(r.hoistedPrefix).toEqual(['echo "=== tscheck ==="']);
+    expect(r.hoistedSuffix).toEqual([]);
+    expect(r.hasFollowingStatement).toBe(false);
+  });
+
+  it("refuses a trailing statement that reads `$?` instead of printing a wrong status", () => {
+    // bash: `printf 'a\n' | grep nomatch; echo "R=$?"` prints R=1. Stripping
+    // the extractor would make `$?` observe `printf` (R=0), so the guard must
+    // leave the command completely alone.
+    expect(
+      stripTrailingExtractors('npm exec flh 2>&1 | grep nomatch; echo "R=$?"', sinks),
+    ).toBeUndefined();
+    expect(stripTrailingExtractors("npm test | tail -5; echo ${PIPESTATUS[0]}", sinks)).toBeUndefined();
+    expect(stripTrailingExtractors("npm test | tail -5; true", sinks)).toBeDefined();
+  });
+
+  it("leaves a command untouched when a `$?` suffix blocks it without sinks", () => {
+    const command = 'echo "=== t ===" && npm test 2>&1 | tail -12; echo "R=$?"';
+    expect(stripTrailingExtractors(command)).toBeUndefined();
+    // …and with sinks too: the reason is the status read, not the missing sink.
+    expect(stripTrailingExtractors(command, sinks)).toBeUndefined();
+  });
+
+  it("hoists a trailing statement that does not read the status", () => {
+    const r = stripTrailingExtractors('echo "=== t ===" && npm test 2>&1 | tail -12; echo "done"', sinks)!;
+    expect(r.hoistedSuffix).toEqual(['echo "done"']);
+    expect(r.hasFollowingStatement).toBe(true);
+  });
+
+  it("hoists a leading statement", () => {
+    const r = stripTrailingExtractors("echo hi; npm test | tail -5", sinks)!;
+    expect(r.execCommand).toBe(`{ echo hi\n} >> '${sinks.prefix}' 2>&1; npm test`);
+    expect(r.hoistedPrefix).toEqual(["echo hi"]);
+    expect(r.hoistedSuffix).toEqual([]);
+  });
+
+  it("hoists a trailing statement", () => {
+    const r = stripTrailingExtractors("npm test | tail -5; echo done", sinks)!;
+    expect(r.execCommand).toBe(`npm test; { echo done\n} >> '${sinks.suffix}' 2>&1`);
+    expect(r.hoistedSuffix).toEqual(["echo done"]);
+  });
+
+  it("hoists an `||` member", () => {
+    const r = stripTrailingExtractors("a || b | tail -3", sinks)!;
+    expect(r.execCommand).toBe(`{ a\n} >> '${sinks.prefix}' 2>&1 || b`);
+  });
+
+  it("hoists several statements in execution order", () => {
+    const r = stripTrailingExtractors("echo one; echo two; npm test | tail -5; echo three", sinks)!;
+    expect(r.hoistedPrefix).toEqual(["echo one", "echo two"]);
+    expect(r.hoistedSuffix).toEqual(["echo three"]);
+  });
+
+  it("keeps silently-prefixed pipelines untouched (no needless sink)", () => {
+    const r = stripTrailingExtractors("cd /tmp && npm test 2>&1 | tail -5", sinks)!;
+    expect(r.execCommand).toBe("cd /tmp && npm test 2>&1");
+    expect(r.hoistedPrefix).toEqual([]);
+    expect(r.hoistedSuffix).toEqual([]);
+  });
+
+  it("refuses to hoist a statement that carries its own extractor", () => {
+    expect(stripTrailingExtractors("cat x | head -3 && npm test | tail -5", sinks)).toBeUndefined();
+    expect(stripTrailingExtractors("npm test | tail -5; cat x | head -3", sinks)).toBeUndefined();
+  });
+
+  it("refuses to hoist a backgrounded statement", () => {
+    expect(stripTrailingExtractors("npm test | tail -5; sleep 1 &", sinks)).toBeUndefined();
+    expect(stripTrailingExtractors("sleep 1 & npm test | tail -5", sinks)).toBeUndefined();
+  });
+
+  it("refuses to hoist a here-document statement", () => {
+    expect(
+      stripTrailingExtractors("cat <<EOF\nhi\nEOF\nnpm test | tail -5", sinks),
+    ).toBeUndefined();
+  });
+
+  it("refuses when any other statement carries its own extractor", () => {
+    // Whichever statement is picked as the window, the other one would have to
+    // be hoisted with the shell still applying its extractor.
+    expect(stripTrailingExtractors("grep x f | head -2; npm test | tail -5", sinks)).toBeUndefined();
+  });
+
+  it("flags a following statement so a failing view is not reported as a failure", () => {
+    // `a | grep x; echo done` exits 0 in bash — the echo owns the status.
+    expect(stripTrailingExtractors("npm test | grep x")!.hasFollowingStatement).toBe(false);
+    expect(stripTrailingExtractors("npm test | grep x; echo done", sinks)!.hasFollowingStatement).toBe(true);
+    expect(stripTrailingExtractors("npm test | grep x; true")!.hasFollowingStatement).toBe(true);
+    // A non-silent following statement still needs a sink.
+    expect(stripTrailingExtractors("npm test | grep x; echo done")).toBeUndefined();
+  });
+
+  it("strips behind a trailing silent statement without needing a sink", () => {
+    // `true` writes nothing to stdout, so it can simply stay in place.
+    const r = stripTrailingExtractors("npm test | tail -5; true")!;
+    expect(r.execCommand).toBe("npm test; true");
+    expect(r.hoistedSuffix).toEqual([]);
+    expect(r.hasFollowingStatement).toBe(true);
   });
 });

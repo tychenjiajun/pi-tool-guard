@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { existsSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const mockPersistFullOutput = vi.hoisted(() => vi.fn());
@@ -152,6 +153,20 @@ describe("rethrowGuardedError", () => {
       expect.stringContaining("do NOT re-run"),
       "info",
     );
+  });
+
+  it("re-attaches hoisted output around the projected error body", async () => {
+    const { mockPi, ctx } = makeContext();
+    const err = new Error("raw\n\nCommand exited with code 1");
+
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, stdout: "projected" });
+
+    await expect(
+      rethrowGuardedError(ctx, stripped, "echo hi; npm test | tail -5", err, undefined, {
+        prefix: "hi\n",
+        suffix: "bye\n",
+      }),
+    ).rejects.toThrow(/^hi\nprojected\nbye\n\n\[Command exited with code 1\]/);
   });
 });
 
@@ -347,21 +362,76 @@ describe("executeBashGuarded background operator", () => {
     );
   });
 
-  it("passes a multi-statement command through unchanged (no unscoped projection)", async () => {
+  it("hoists a stdout-sharing statement instead of projecting the whole command", async () => {
     const { mockOriginalExecute, ctx, mockCtx, mockPi } = makeContext();
     const params = { command: "seq 1 100 && seq 1000 1100 | head -n 5" };
+    const sinks: string[] = [];
+    mockOriginalExecute.mockImplementation(async (_id, modified: { command: string }) => {
+      for (const match of modified.command.matchAll(/>> '([^']+)'/g)) {
+        sinks.push(match[1]!);
+        writeFileSync(match[1]!, "hoisted\n", "utf-8");
+      }
+      return { content: [{ type: "text", text: "line1\nline2\nline3" }], details: undefined };
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, stdout: "line1" });
 
     const result = await executeBashGuarded(
       ctx, "c1", params,
       new AbortController().signal, () => {}, {},
     );
 
-    // Untouched: no stripping, no extractor subprocess, no guard contract.
+    // `seq 1 100` is redirected into a side channel so `head -n 5` only ever
+    // sees `seq 1000 1100`.
+    const executed = (mockOriginalExecute.mock.calls[0]![1] as { command: string }).command;
+    expect(executed).toMatch(/^\{ seq 1 100\n\} >> '[^']+' 2>&1 && seq 1000 1100$/);
+    expect(sinks).toHaveLength(1);
+    expect(existsSync(sinks[0]!)).toBe(false); // disposed in the finally
+
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("projection-applied");
+    expect(guard?.removedPipeline).toBe("head -n 5");
+    // Hoisted output is re-attached around the projection.
+    expect(result.content[0]).toEqual({ type: "text", text: "hoisted\nline1" });
+    expect(mockCtx.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("re-attaches a trailing statement around the projection", async () => {
+    const { mockOriginalExecute, ctx, mockPi } = makeContext();
+    const params = { command: 'npm test 2>&1 | tail -5; echo "done"' };
+    mockOriginalExecute.mockImplementation(async (_id, modified: { command: string }) => {
+      for (const match of modified.command.matchAll(/>> '([^']+)'/g)) {
+        writeFileSync(match[1]!, match[1]!.includes("sink") ? "done\n" : "", "utf-8");
+      }
+      return { content: [{ type: "text", text: "a\nb\nc" }], details: undefined };
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, stdout: "b\nc" });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", params,
+      new AbortController().signal, () => {}, {},
+    );
+
+    const executed = (mockOriginalExecute.mock.calls[0]![1] as { command: string }).command;
+    expect(executed).toMatch(/^npm test 2>&1; \{ echo "done"\n\} >> '[^']+' 2>&1$/);
+    expect(result.content[0]).toEqual({ type: "text", text: "b\nc\ndone\n" });
+    expect(readPiToolGuardDetails(result.details)?.removedPipeline).toBe("tail -5");
+  });
+
+  it("passes commands through when a statement cannot be hoisted", async () => {
+    const { mockOriginalExecute, ctx, mockPi } = makeContext();
+    // The earlier statement has its own extractor: hoisting would leave the
+    // shell applying `head -3` while the guard projects `tail -5`.
+    const params = { command: "cat x | head -3 && npm test | tail -5" };
+
+    const result = await executeBashGuarded(
+      ctx, "c1", params,
+      new AbortController().signal, () => {}, {},
+    );
+
     expect(mockOriginalExecute).toHaveBeenCalledWith(
       "c1", params, expect.anything(), expect.any(Function), {},
     );
     expect(mockPi.exec).not.toHaveBeenCalled();
-    expect(mockCtx.ui.notify).not.toHaveBeenCalled();
     expect(readPiToolGuardDetails(result.details)).toBeUndefined();
   });
 });
@@ -371,6 +441,24 @@ describe("executeBashGuarded background operator", () => {
 // -------------------------------------------------------------------------
 
 describe("executeBashGuarded extractor exit-code fidelity", () => {
+  it("does not fail the command when a statement follows the window", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "" }],
+      details: undefined,
+    });
+    // `grep` re-run finds nothing (exit 1), exactly like the shell's own grep.
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 1, stdout: "" });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "npm test | grep FAIL; echo done" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // The script exits 0 (the echo owns the status), so the guard must project
+    // rather than throw `Command exited with code 1`.
+    expect(readPiToolGuardDetails(result.details)?.outcome).toBe("projection-applied");
+  });
   it("throws when the extractor pipeline exits non-zero (code 2)", async () => {
     const { mockPi, mockOriginalExecute, ctx } = makeContext();
     mockOriginalExecute.mockResolvedValue({

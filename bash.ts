@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -145,8 +145,16 @@ export async function runExtractorOnText(
 const FULL_OUTPUT_FILENAME_RE = /^pi-bash-guard-.*\.log$/;
 
 /**
- * Best-effort removal of stale full-output temp files. Deletes files in `dir`
- * whose name matches `/^pi-bash-guard-.*\.log$/` and whose `mtimeMs` is older
+ * Names the guard owns in the OS temp dir: full-output logs
+ * (`pi-bash-guard-*.log`) and side-channel sinks (`pi-bash-guard-sink-*.out`).
+ * Only the `.log` shape is trusted by downstream reducers; a sink is never
+ * evidence and must never be published as a `fullOutputPath`.
+ */
+const GUARD_TEMP_FILENAME_RE = /^pi-bash-guard-.*\.(?:log|out)$/;
+
+/**
+ * Best-effort removal of stale guard temp files. Deletes files in `dir` whose
+ * name matches `/^pi-bash-guard-.*\.(?:log|out)$/` and whose `mtimeMs` is older
  * than `maxAgeMs`. Never throws; returns the count of files removed.
  */
 export function sweepStaleFullOutputs(
@@ -162,7 +170,7 @@ export function sweepStaleFullOutputs(
     return 0;
   }
   for (const name of entries) {
-    if (!FULL_OUTPUT_FILENAME_RE.test(name)) continue;
+    if (!GUARD_TEMP_FILENAME_RE.test(name)) continue;
     const filePath = join(dir, name);
     try {
       const st = statSync(filePath);
@@ -175,6 +183,77 @@ export function sweepStaleFullOutputs(
     }
   }
   return removed;
+}
+
+// ---------------------------------------------------------------------------
+// Side-channel sinks (hoisted statements)
+// ---------------------------------------------------------------------------
+
+/** Filename prefix for guard side-channel sinks (see `pipeline.ts`). */
+export const SIDE_CHANNEL_FILENAME_PREFIX = "pi-bash-guard-sink-";
+
+/**
+ * Reserve a side-channel temp path. Returns undefined when the OS temp dir is
+ * unusable, in which case hoisting is skipped and the command is passed through
+ * untouched.
+ */
+export function createSideChannelPath(): string | undefined {
+  try {
+    return join(tmpdir(), `${SIDE_CHANNEL_FILENAME_PREFIX}${randomBytes(8).toString("hex")}.out`);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Create/truncate a side-channel file so the shell's `>>` append can never fail
+ * on a missing parent directory. Returns false on any filesystem error.
+ */
+export function resetSideChannel(path: string): boolean {
+  try {
+    writeFileSync(path, "", "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read a side-channel file; "" when it is missing or unreadable. */
+export function readSideChannel(path: string): string {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+/** Best-effort removal of a side-channel file. */
+export function removeSideChannel(path: string): void {
+  try {
+    rmSync(path);
+  } catch {
+    // best-effort: a leftover sink is swept by `sweepStaleFullOutputs`
+  }
+}
+
+/**
+ * Re-attach hoisted statements' output around the projection.
+ *
+ * The projection is `trimEnd`-ed by the extractor helpers, so a plain
+ * concatenation could glue the last projected line to the first hoisted line
+ * (`foo` + `TSCHECK=0`). A newline is inserted only when the accumulated text
+ * does not already end with one, so a well-formed prefix/suffix is untouched.
+ * Empty parts are dropped, which is what hides pi's `(no output)` placeholder
+ * once a hoisted statement has produced real output.
+ */
+export function joinOutputStreams(...parts: Array<string | undefined>): string {
+  let out = "";
+  for (const part of parts) {
+    if (!part) continue;
+    if (out.length > 0 && !out.endsWith("\n")) out += "\n";
+    out += part;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,11 @@ import {
   sweepStaleFullOutputs,
   persistFullOutput,
   parseBashError,
+  joinOutputStreams,
+  createSideChannelPath,
+  resetSideChannel,
+  readSideChannel,
+  removeSideChannel,
 } from "./bash.ts";
 import { rethrowGuardedError, executeBashGuarded, type ExecuteContext, type ToolResult } from "./execute.ts";
 import { stripTrailingExtractors } from "./pipeline.ts";
@@ -1009,5 +1014,67 @@ describe("F6: sweepStaleFullOutputs", () => {
 describe("EMPTY_OUTPUT_PLACEHOLDER", () => {
   it("matches the literal string pi uses for empty results", () => {
     expect(EMPTY_OUTPUT_PLACEHOLDER).toBe("(no output)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Side-channel sinks (hoisted statements)
+// ---------------------------------------------------------------------------
+
+describe("joinOutputStreams", () => {
+  it("returns the middle verbatim when nothing was hoisted", () => {
+    expect(joinOutputStreams("", "line1\nline2", "")).toBe("line1\nline2");
+  });
+
+  it("re-attaches prefix and suffix in shell order", () => {
+    expect(joinOutputStreams("=== t ===\n", "line1", "R=0\n")).toBe("=== t ===\nline1\nR=0\n");
+  });
+
+  it("inserts a newline only when the accumulated text needs one", () => {
+    // The projection is `trimEnd`-ed, so without this guard the suffix would
+    // glue onto the last projected line.
+    expect(joinOutputStreams("head", "tail", "R=1")).toBe("head\ntail\nR=1");
+  });
+
+  it("drops empty and undefined parts", () => {
+    expect(joinOutputStreams(undefined, "", "only")).toBe("only");
+    expect(joinOutputStreams("", "", "")).toBe("");
+  });
+});
+
+describe("side-channel sinks", () => {
+  it("round-trips through create/reset/read/remove", () => {
+    const path = createSideChannelPath()!;
+    expect(path).toMatch(/pi-bash-guard-sink-[0-9a-f]+\.out$/);
+    try {
+      expect(resetSideChannel(path)).toBe(true);
+      expect(readSideChannel(path)).toBe("");
+      writeFileSync(path, "hoisted text", "utf-8");
+      expect(readSideChannel(path)).toBe("hoisted text");
+    } finally {
+      removeSideChannel(path);
+    }
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("returns safe fallbacks for unusable paths", () => {
+    expect(readSideChannel("/nonexistent/dir/pi-bash-guard-sink-x.out")).toBe("");
+    expect(resetSideChannel("/nonexistent/dir/pi-bash-guard-sink-x.out")).toBe(false);
+    // Removal never throws on a missing file.
+    expect(() => removeSideChannel("/nonexistent/dir/pi-bash-guard-sink-x.out")).not.toThrow();
+  });
+
+  it("sweeps stale sinks alongside stale full-output logs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-tool-guard-sink-sweep-"));
+    const sink = join(dir, "pi-bash-guard-sink-deadbeef.out");
+    await writeFile(sink, "hoisted");
+    const staleTime = new Date(Date.now() - (FULL_OUTPUT_TTL_MS + 1000));
+    const { utimes } = await import("node:fs/promises");
+    await utimes(sink, staleTime, staleTime);
+
+    expect(sweepStaleFullOutputs(dir, FULL_OUTPUT_TTL_MS)).toBe(1);
+    expect(existsSync(sink)).toBe(false);
+
+    await rm(dir, { recursive: true, force: true });
   });
 });
