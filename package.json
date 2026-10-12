@@ -1,13 +1,17 @@
 {
   "name": "pi-tool-guard",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
-  "description": "Pi extension that corrects LLM tool calls: normalizes argument aliases for edit/write/read and strips trailing pipeline extractors from bash commands",
+  "description": "Pi extension that repairs LLM tool calls before they fail: normalizes argument aliases for edit/write/read and strips trailing head/tail/grep pipeline extractors from bash, so the model reads the 20 lines it asked for instead of a 1,500-line log.",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts",
     "./contract": "./contract.ts",
-    "./contract.ts": "./contract.ts"
+    "./contract.ts": "./contract.ts",
+    "./pipeline": "./pipeline.ts",
+    "./pipeline.ts": "./pipeline.ts",
+    "./aliases": "./aliases.ts",
+    "./aliases.ts": "./aliases.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -16,25 +20,65 @@
   "keywords": [
     "pi-package",
     "pi-extension",
+    "pi-coding-agent",
+    "pi",
+    "llm",
+    "ai-agent",
+    "ai-agents",
+    "ai-coding",
+    "agentic-coding",
+    "tool-calling",
+    "tool-call-repair",
+    "tool-override",
     "argument-normalization",
     "alias-correction",
-    "tool-override",
-    "pipeline-optimization"
+    "bash",
+    "shell",
+    "pipeline",
+    "pipeline-optimization",
+    "output-projection",
+    "output-truncation",
+    "context-window",
+    "context-savings",
+    "token-savings",
+    "head",
+    "tail",
+    "grep",
+    "unbash",
+    "sol-pi",
+    "typescript",
+    "developer-tools",
+    "cli",
+    "mcp"
   ],
-  "author": "Jiajun Chen <tychenjiajun@gmail.com>",
+  "author": "Jiajun Chen <tychenjiajun@live.cn>",
   "license": "MIT",
+  "homepage": "https://www.npmjs.com/package/pi-tool-guard",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tychenjiajun/pi-tool-guard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tychenjiajun/pi-tool-guard/issues"
+  },
+  "sideEffects": false,
   "files": [
     "*.ts",
     "!*.test.ts",
     "README.md",
-    "README_zh.md",
+    "README.zh-CN.md",
     "CONTEXT.md",
-    "LICENSE"
+    "LICENSE",
+    "assets/**"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "image": "./assets/preview.svg"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.99.2",

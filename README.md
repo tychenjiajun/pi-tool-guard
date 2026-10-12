@@ -1,82 +1,109 @@
 # pi-tool-guard
 
-A pi extension that corrects common LLM tool call mistakes: normalizes argument aliases for `edit`/`write`/`read` and strips trailing pipeline extractors from `bash` commands.
+English | [简体中文](./README.zh-CN.md)
+
+<p align="center">
+  <img src="./assets/preview.svg" alt="pi-tool-guard repairs LLM tool calls before they fail: argument aliases for edit/write/read and trailing head/tail/grep pipeline extractors for bash" width="880">
+</p>
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
+[![Release](https://img.shields.io/github/v/release/tychenjiajun/pi-tool-guard)](https://github.com/tychenjiajun/pi-tool-guard/releases/latest)
+[![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
+[![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](./tsconfig.json)
+[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen.svg)](./package.json)
+[![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
+[![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
+
+> **In one sentence:** *the defensive layer between the model and its tools —
+> it renames the argument fields the model got wrong and turns a noisy bash
+> pipeline into the view the model actually asked for, while keeping the full
+> output one `read` away.*
+
+**pi-tool-guard** is an open-source (MIT), TypeScript extension for the
+[pi](https://github.com/earendil-works/pi) AI coding agent. It overrides pi's
+built-in `edit`, `write`, `read`, and `bash` tools and repairs two of the most
+common LLM agent failures **before they reach the tool**:
+
+1. **wrong argument names** (`file` instead of `path`, `old_str` instead of
+   `oldText`, `contents` instead of `content`, …), and
+2. **oversized bash output** — the model appends `| head -30` or `| grep FAIL |
+   tail -5`, the shell *does* apply it, but the guard also persists the full,
+   unextracted log so nothing is lost while the context only pays for the
+   projection.
+
+No re-prompt, no retry, no `Error: invalid arguments`. If the model can call the
+tool at all, the guard makes the call go through.
+
+## Why this exists
+
+Every long agent session hits the same two failure modes:
+
+- **Alias roulette.** The model knows *what* to edit but not the exact field
+  name. `{"file": "src/app.ts", "old_str": "…", "new_str": "…"}` is a perfectly
+  reasonable guess — and pi rejects it before any extension sees the call.
+- **Log flooding.** A build or test command prints 1,500 lines. The model asks
+  for the tail, the shell runs the pipeline, and the tool result still carries
+  the whole truncated log into the next request. Context is spent on lines no
+  one will read, and the model re-runs the command to "see" the right part.
+
+pi-tool-guard fixes both at the tool boundary, in one pass, with no forking of
+pi's tools and no session scanning.
 
 ## Install
 
 ```bash
+# from npm (recommended)
 pi install npm:pi-tool-guard
+
+# from git
+pi install git:github.com/tychenjiajun/pi-tool-guard
+
+# from a local checkout
+pi install ./pi-tool-guard
+
+# try it for one session without saving it to settings
+pi -e npm:pi-tool-guard
 ```
 
----
+The extension overrides the built-in tool definitions through the public
+`registerTool` API, so there is nothing to uninstall from pi and nothing to
+configure. `pi list` shows configured packages; `pi remove <source>` removes
+one.
 
-## Features
+## What it does
 
-### 1. Argument alias normalization (`edit` / `write` / `read`)
+Two independent guards, both installed automatically at session start:
 
-When the LLM calls a tool with wrong field names, the extension normalizes them before schema validation. No error, no re-execution.
+| Guard | Tool(s) | Trigger | Effect |
+|---|---|---|---|
+| **Argument normalization** | `edit`, `write`, `read` | An alias field name, a top-level `oldText`/`newText`, a JSON-string `edits`, or a string `offset`/`limit` | Rewrites arguments in place via `prepareArguments`, before schema validation |
+| **Bash pipeline projection** | `bash` | A trailing **view extractor** (`head`, `tail`, `grep`, `rg`, …) | Runs the cleaned command, re-applies the view, and keeps the full output on disk |
 
-| Tool | Canonical | Accepted aliases |
-|---|---|---|
-| edit | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
-| edit | `edits[].oldText` | `old_str`, `old_string`, `oldContent`, `old`, `original`, `search` |
-| edit | `edits[].newText` | `new_str`, `new_string`, `newContent`, `new`, `replacement`, `replace` |
-| write | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
-| write | `content` | `text`, `body`, `code`, `data`, `fileContent`, `contents` |
-| read | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
-| read | `offset` | `start`, `startLine`, `start_line`, `from`, `line` |
-| read | `limit` | `lines`, `maxLines`, `max_lines`, `count`, `numLines`, `num_lines` |
+## Before → after
 
-> **Edit tool shorthand**: top-level `oldText`/`newText` (or aliases) are automatically wrapped into an `edits` array.
->
-> **Read tool type coercion**: string values for `offset` and `limit` are coerced to numbers.
+**Alias repair** — no error, no retry:
 
-### 2. Bash pipeline extractor stripping
+```jsonc
+// the model sends
+{ "file": "src/app.ts", "old_str": "foo", "new_str": "bar" }
+// the guard validates and runs
+{ "path": "src/app.ts", "edits": [{ "oldText": "foo", "newText": "bar" }] }
+```
 
-When the LLM appends truncation commands (`tail`, `head`, `grep`, etc.) to bash commands, the extension strips them and applies the extractor intelligently.
-
-**Four-case strategy:**
-
-| Scenario | UI Notification | LLM Response |
-|---|---|---|
-| Fast command (< 10s), truncated | — (none; identical to the built-in bash tool) | Filtered result only |
-| Fast command (< 10s), not truncated | — (none; identical to the built-in bash tool) | Filtered result only |
-| Slow command (truncated or not) | `The full output is above...` + guard receipt | Projected view + **Full-Output Readback** notice (inlines the saved path and says to read it instead of re-running) |
-| Error (non-zero exit) | `Filtered via ...` | Projected text + `[Command exited with code N. Full output: <path>]` |
-
-> **Notification format**: The UI notification shows both the full original command and the extracted pipeline. Example: `Removed trailing pipeline commands: \`grep FAIL | head -5\` from \`npm test | grep FAIL | head -5\`.` Fast commands show no notice and no receipt, so they look exactly like the built-in tool.
-
-**Example:** `vitest run | tail -n 10`
-- If vitest finishes in < 10s → run `tail` on result (or full output file if truncated), no UI
-- If vitest is slow → persist the full, unextracted output to a temp file, return the projected view, notify UI, append a Full-Output Readback notice (path + "read it instead of re-running") to the LLM
-- If vitest exits non-zero → recover the output and `Full output: <path>` pointer from the error, apply `tail` to the available full output, throw an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`
-
-**Extractor split:** Not all trailing pipeline commands are stripped. The guard distinguishes:
-
-- **View extractors** (safe to strip; the guard re-applies them): `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more`
-- **Transform extractors** (NOT stripped): `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `column`, `jq`, `yq`, `tr`
-
-If the trailing pipeline contains any transform extractor, the guard leaves the command completely unchanged and runs it as-is (so the shell applies the transform). Stripping a transform would silently drop the transformation the user asked for.
-
-Only view extractors are stripped: `npm test | grep FAIL | head -5` → strips `grep FAIL | head -5`
-
-**Multi-statement safety:** stripping is only attempted when the trailing view's stdout is the whole command's stdout. A lone pipeline, or one surrounded by statements the guard can account for, is eligible. Statements that share the script's stdout but sit outside the window — a non-silent prefix (`cd /tmp && echo "=== build ===" && npm test | tail`) or a trailing `; echo done` — are **hoisted** into a temp side-channel file (`{ echo "=== build ==="\n} >> '<sink>' 2>&1`) so the shell preserves every byte, and the guard re-attaches that text around the projection. A prefix that is provably silent (`cd`, bare assignments, `true`, `:`, `test`, `[`, without redirects) needs no sink at all. What is still left untouched: a statement that carries its own extractor (`a | head && b | tail`), a backgrounded statement, a here-document, and — importantly — a trailing statement that reads the previous status:
+**Bash projection** — the model keeps its pipeline, the context stops paying for it:
 
 ```bash
-printf 'a\n' | grep nomatch; echo "R=$?"   # bash prints R=1
+# the model writes
+npm test 2>&1 | grep -E 'FAIL|Tests' | tail -5
+
+# the guard runs, and returns just
+Tests  12 failed | 4 passed (16)
 ```
 
-Stripping `grep` would make `$?` observe `printf` (printing `R=0`), and the guard only learns the view's status *after* the command has run, so it passes the command through untouched rather than printing a lie. Prefixes are safe to hoist because `$?` there refers to whatever ran before them, which the guard never touches.
-
-**Fast-path fidelity:** for fast commands the guard executes the *cleaned* command and re-applies the stripped extractor to pi's formatted result, rather than running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs.
-
-**Exit codes:** Extractor exit codes are propagated, matching pi's own `cmd | extractor` behavior: a stripped pipeline whose re-applied extractor exits non-zero (e.g. `cmd | grep no-match`, where grep exits 1) fails with `Command exited with code 1`, instead of returning an empty success. On slow commands the error appends `Full output: <path>`. That only holds while the extractor is the command's last command — with a following statement (`cmd | grep x; echo done`) bash exits with *that* statement's status, so the guard projects instead of throwing.
-
-**Empty output:** an empty inline projection renders as `(no output)`, matching pi's own empty-result rendering.
-
-**Slow commands:** For slow commands (≥ 10s), the guard persists the full, unextracted output to a temp file (`pi-bash-guard-<hex>.log` in the OS temp dir; swept best-effort after 24h via `FULL_OUTPUT_TTL_MS` on subsequent persists) even when it is below pi's 50KB/2000-line truncation limit, and returns the projected view (outcome `projection-applied`) instead of dumping the entire output. The `pi-bash-` name plus a `details.fullOutputPath` pointer make that file readable by SoL-Pi's evidence-preserving reducer, so the full log stays reducible even when pi did not truncate. If the full output cannot be persisted (filesystem error) and pi did not truncate, the guard falls back to returning the full output (outcome `full-output`) rather than a projection, so the readback notice is never misleading. The LLM notice inlines that file path and tells the agent to read it on demand — e.g. the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — rather than re-running the expensive command. The guard never replays a previous run; every invocation executes the command again.
-
-**Timing split:** pi's built-in renderer prints one opaque `Took <total>` line. For a **slow** command where the guard ran a stripped extractor, that line is replaced with a SoL-Pi-style receipt. Fast commands keep pi's plain line — no receipt, no UI:
+**Slow commands get a guard receipt** instead of pi's opaque `Took` line:
 
 ```
 🛡 pi-tool-guard · grep FAIL | head -5
@@ -84,34 +111,137 @@ Stripping `grep` would make `$?` observe `printf` (printing `R=0`), and the guar
    Took 6.5s  ██████████████░░░░  cmd 5.0s · filter 1.5s
 ```
 
-The bar is proportional — accent `█` for the cleaned command, warning `░` for the guard's extractor.
+The bar is proportional — accent `█` for the cleaned command, warning `░` for
+the guard's extractor. Fast commands are untouched and look exactly like the
+built-in bash tool.
 
-**Silent no-op:** when applying the extractor leaves the output unchanged (e.g. `tail -20` on a 2-line result), the guard shows no UI notice and no receipt — pi's plain `Took` line stays. Notices and receipts only fire when the projection actually changed the content. No-op detection is only computed for inline (non-truncated) projections; for projections from a saved file the guard cannot cheaply compare against the full text, so it does not claim a no-op.
+## Real results
 
----
+Measured from guard-stamped results in local pi sessions (38 projects, 2,264
+guarded bash calls):
 
-## Architecture
+| Metric | Value |
+|---|---|
+| Projections applied | **2,235** (98.7%) |
+| Full-output fallbacks | 29 |
+| Output lines projected | **102,966 → 42,105 — 59% fewer** |
+| Output bytes projected | **6.56 MB → 2.91 MB — 56% smaller** |
+| Median extractor overhead | **+33 ms** (p90 +73 ms) |
+| Slow runs that surfaced the receipt | 344 |
+| No-op projections (no UI, nothing changed) | 1,092 |
+| Full-Output Readback notices attached | 293 |
 
-Alias normalization uses `prepareArguments` on the overridden `edit`/`write`/`read` tools — the cleanest pi extension pattern for argument correction:
+The most common stripped pipelines were `head -40`, `head -20`, `head -30`,
+`tail -20`, and `grep -v node_modules`; the largest single projection took a
+**1,462-line** log down to the **20 lines** the model asked for. The guard never
+deletes a byte: the full log stays on disk and is one `read` away.
 
-- **edit/write/read**: `createXxxToolDefinition(cwd)` + `prepareArguments` normalizes aliases before schema validation
+## Argument alias normalization
 
-Bash runs a custom `execute` override:
+Field aliases are renamed **in place** by `prepareArguments` on the overridden
+`edit`/`write`/`read` definitions — the cleanest pi extension pattern for
+argument correction, running before pi's schema validation. Three shapes are
+repaired beyond simple key renames:
 
-1. `execute` parses the command with [unbash](https://github.com/nicolo-ribaudo/unbash) and strips trailing **view** extractors (transform extractors are left in place). It only strips a lone final pipeline or one surrounded by statements it can account for: provably silent ones stay in place, and non-silent ones are **hoisted** into a temp side-channel sink (`{ <text>\n} >> '<sink>' 2>&1`) whose text is re-attached around the projection. Statements carrying their own extractor, backgrounded statements, here-documents, and trailing status readers (`$?`/`PIPESTATUS`) pass the whole command through unchanged. Stripping happens here (not in `prepareArguments`) so `tool_result.input.command` keeps the command the user wrote.
-2. The cleaned command is run through the original built-in execute.
-3. If fast (< 10s) + truncated → runs extractor on the full output file via `pi.exec`
-4. If fast (< 10s) + not truncated → pipes result through extractor via `pi.exec`
-5. If slow (truncated or not) → persists the full, unextracted output to a temp file (`pi-bash-guard-<hex>.log`, OS temp dir; swept best-effort after 24h via `FULL_OUTPUT_TTL_MS` on subsequent persists), runs the extractor, returns the projected view + Full-Output Readback notice (falls back to outcome `full-output` if persisting fails and pi did not truncate)
-6. If the command exits non-zero → recovers the output and `Full output: <path>` pointer from the error, applies the stripped (view) extractor to the available full output, and throws an error whose message is the projected text followed by a bracket note preserving the exit code and full-output path
+- **Top-level shorthand**: `{ oldText, newText }` (or their aliases) is wrapped
+  into `{ edits: [{ oldText, newText }] }`.
+- **JSON-string edits**: `edits` given as a JSON string is parsed into an array.
+- **Type coercion for `read`**: string `offset` / `limit` become integers.
 
-No session scanning. Error path: a thrown error cannot carry `details`, so no `piToolGuard` contract is published on the error path — this is a documented limitation.
+| Tool | Canonical | Accepted aliases |
+|---|---|---|
+| `edit` | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
+| `edit` | `edits[].oldText` | `old_str`, `old_string`, `old_text`, `oldStr`, `oldString`, `oldContent`, `old_content`, `old`, `original`, `search` |
+| `edit` | `edits[].newText` | `new_str`, `new_string`, `new_text`, `newStr`, `newString`, `newContent`, `new_content`, `new`, `replacement`, `replace` |
+| `write` | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
+| `write` | `content` | `text`, `body`, `code`, `data`, `fileContent`, `file_content`, `contents` |
+| `read` | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
+| `read` | `offset` | `start`, `startLine`, `start_line`, `from`, `line` |
+| `read` | `limit` | `lines`, `maxLines`, `max_lines`, `count`, `numLines`, `num_lines` |
 
----
+## Bash pipeline projection
+
+Bash commands are parsed with [unbash](https://github.com/nicolo-ribaudo/unbash)
+and the trailing pipeline is classified as **view** or **transform**:
+
+| Kind | Commands | Behavior |
+|---|---|---|
+| **View** (stripped) | `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more` | Removed and re-applied by the guard to the full output |
+| **Transform** (kept) | `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `column`, `jq`, `yq`, `tr` | Left in the command; the shell applies it, the guard stays out of the way |
+
+Only view extractors are stripped: `npm test | grep FAIL | head -5` becomes
+`npm test`, and the guard re-applies `grep FAIL | head -5` itself. Stripping
+happens in `execute` (not `prepareArguments`), so `tool_result.input.command`
+keeps the command the user actually wrote.
+
+### Multi-statement safety (hoisting)
+
+Stripping is only attempted when the trailing view's stdout is the whole
+command's stdout. Statements around the window are **hoisted** into a temp
+side-channel sink (`{ <text>\n} >> '<sink>' 2>&1`) so the shell preserves every
+byte, and the guard re-attaches that text around the projection:
+
+```bash
+cd x && echo "=== build ===" && npm test | tail -12
+# →
+cd x && { echo "=== build ==="
+} >> '<sink>' 2>&1 && npm test
+```
+
+A **silent prefix** (`cd`, bare assignments, `true`, `:`, `test`, `[`, without
+redirects) needs no sink at all. The guard leaves the command completely
+untouched when it cannot be faithful:
+
+- a statement that carries its own extractor (`a | head && b | tail`),
+- a **backgrounded** final statement (`… &`) — slicing out the view would drop
+  the `&` and silently foreground the job,
+- a command containing a **here-document** (its body lives outside the
+  statement's span),
+- a trailing statement that reads `$?`, `${?}`, or `PIPESTATUS` — the removed
+  view is no longer the pipeline's last command, so the guard passes the whole
+  command through rather than print a wrong status:
+
+  ```bash
+  printf 'a\n' | grep nomatch; echo "R=$?"   # bash prints R=1; stripping would print R=0
+  ```
+
+### Exit codes and empty output
+
+Extractor exit codes are propagated, matching pi's own `cmd | extractor`
+behavior: `cmd | grep no-match` fails with `Command exited with code 1` instead
+of returning an empty success. That holds only while the extractor is the
+command's last command; with a following statement (`cmd | grep x; echo done`)
+bash exits with *that* statement's status, so the guard projects instead of
+throwing. An empty inline projection renders as `(no output)`, matching pi's
+own empty-result rendering.
+
+### Fast and slow paths
+
+| Command | Behavior |
+|---|---|
+| **Fast** (< 10 s) | Run the cleaned command, apply the view to pi's formatted result, return the projection. **No notice, no receipt — visually identical to the built-in bash tool.** |
+| **Slow** (≥ 10 s) | Persist the full, unextracted output to `pi-bash-guard-<hex>.log` in the OS temp dir, apply the view, return the projection plus a **Full-Output Readback** notice that inlines the path. |
+
+The slow log exists even when pi itself did not truncate, and its
+`pi-bash-guard-*.log` name — published as `details.fullOutputPath` — keeps it
+readable by [SoL-Pi](https://github.com/NVlabs/SoL-Pi)'s evidence-preserving
+reducer. Logs older than 24 h (`FULL_OUTPUT_TTL_MS`) are swept best-effort on
+subsequent persists. If persisting fails and pi did not truncate, the guard
+falls back to the full output rather than a projection, so the notice is never
+misleading.
+
+### Silent no-op
+
+When applying the extractor leaves the output unchanged (e.g. `tail -20` on a
+2-line result), the guard shows no notice and no receipt — pi's plain `Took`
+line stays. No-op detection is computed for inline (non-truncated) projections
+only.
 
 ## Interop: `details.piToolGuard`
 
-When the guard strips extractors it stamps a versioned record on `details.piToolGuard` so other `tool_result` handlers — notably [SoL-Pi](https://github.com/earendil-works/soL-pi)'s evidence-preserving reducer — can tell what the visible content really is:
+When the guard strips extractors it stamps a versioned record on
+`details.piToolGuard` so other `tool_result` handlers — notably SoL-Pi's
+evidence-preserving reducer — can tell what the visible content really is:
 
 ```ts
 interface PiToolGuardDetails {
@@ -121,8 +251,8 @@ interface PiToolGuardDetails {
   removed: string[];         // e.g. ["tail"]
   removedPipeline: string;   // e.g. "tail -20"
   outcome: "projection-applied" | "full-output";
-  sourcePath?: string;       // untruncated output, when Pi produced one
-  timing?: {                 // per-phase wall clock, when guard took effect
+  sourcePath?: string;       // untruncated output, when pi produced one
+  timing?: {                 // per-phase wall clock
     commandMs: number;       // cleaned command execution
     extractorMs: number;     // guard's extractor projection (0 when none ran)
     totalMs: number;         // commandMs + extractorMs
@@ -133,25 +263,128 @@ interface PiToolGuardDetails {
     outputLines: number;
     outputBytes: number;
   };
-  noop?: boolean;            // projection left the output unchanged (inline projections only)
+  noop?: boolean;            // projection left the output unchanged (inline only)
   slow?: boolean;            // cleaned command ran >= 10s; only slow runs show guard UI
 }
 ```
 
-- `outcome: "projection-applied"` — `content` is the user's projection, applied as a fallback. The guard **always keeps** `details.fullOutputPath`/`truncation` (so a reducer still archives the full log) and mirrors the path as `piToolGuard.sourcePath`. When pi did not truncate but the guard persisted its own slow log, the guard also publishes that `pi-bash-guard-*.log` path as `details.fullOutputPath`. SoL-Pi's reducer reads `fullOutputPath`, reduces the full log, and overrides guard's projection with its receipt.
-- `outcome: "full-output"` — `content` is the cleaned command's full output and `details.fullOutputPath` is kept. Also the fallback when a slow command's full output cannot be persisted (filesystem error) and pi did not truncate.
-- `slow` — optional boolean; `true` means the cleaned command ran for at least `FAST_THRESHOLD_MS`. Only slow runs surface guard UI (Notice, footer status, receipt); fast commands look exactly like the built-in bash tool.
+- `outcome: "projection-applied"` — `content` is the user's projection, applied
+  as a fallback. The guard **always keeps** `details.fullOutputPath` /
+  `truncation`, and mirrors the path as `piToolGuard.sourcePath`, so a
+  downstream reducer can read the exact full log and override the projection
+  with its own receipt.
+- `outcome: "full-output"` — `content` is the cleaned command's full output and
+  `details.fullOutputPath` is kept. Also the fallback when a slow command's full
+  output cannot be persisted and pi did not truncate.
+- `slow` — `true` when the cleaned command ran for at least `FAST_THRESHOLD_MS`.
+  Only slow runs surface guard UI (Notice, footer status, receipt).
 - No extractors stripped → no record; `details` is left untouched.
+- The **error path** (non-zero exit) cannot carry `details`, so no contract is
+  published there — a documented limitation.
 
-The contract is additive and versioned. Consumers must parse with `readPiToolGuardDetails` (exported from `contract.ts`) and fall back to the inline content for unknown versions.
+The contract is additive and versioned. Consumers must parse with
+`readPiToolGuardDetails` (exported from `contract.ts`) and fall back to the
+inline content for unknown versions.
+
+## Architecture
+
+```
+index.ts       Extension entry; registers the edit/write/read/bash overrides
+aliases.ts     Argument normalization for edit / write / read
+pipeline.ts    Bash parsing (unbash) and extractor stripping
+execute.ts     Core bash execution: strip, run, project, persist, notice
+contract.ts    Versioned details.piToolGuard interop contract
+bash.ts        Extractor runner + notice builders
+timing.ts      Duration formatting and proportional bar split
+format.ts      Pure text measurement, savings/count/byte formatting
+render.ts      Swaps pi's trailing Took line for the guard receipt
+tui.ts         Themed receipt component and transient footer status
+```
+
+Bash flow:
+
+1. `execute` parses the command and strips trailing **view** extractors,
+   hoisting any non-silent statements it must preserve.
+2. The cleaned command runs through the original built-in execute.
+3. Fast + truncated → run the extractor against pi's full-output file via
+   `pi.exec`. Fast + inline → pipe the result through the extractor.
+4. Slow → persist the full, unextracted output, project, and append the
+   Full-Output Readback notice.
+5. Non-zero exit → recover the output and `Full output: <path>` pointer from
+   the error, apply the view, and throw a message carrying the projection plus
+   `[Command exited with code N. Full output: <path>]`.
+
+## Compatibility and limitations
+
+Documented, intentional behaviors — not bugs:
+
+- **Fast-path stderr merge.** Pi merges stdout and stderr before the guard
+  projects, so a stripped `grep`/`head` also filters stderr lines; a native
+  shell pipeline would not. The guard trims trailing whitespace from the
+  projection.
+- **Live stream.** During a fast run pi's `onUpdate` stream shows the cleaned
+  command's unfiltered output; only the returned content is the projection.
+- **Error path has no contract.** A thrown error cannot carry `details`.
+- **Transform extractors are never stripped.** `sed`, `awk`, `jq`, `sort`, …
+  stay in the command on purpose.
+- **No session scanning and no replay.** Every invocation executes the command
+  again; the guard never returns a cached run.
+
+## FAQ
+
+**Is it safe?** Yes. The guard only rewrites tool *arguments* and *re-applies a
+shell command the model already asked for*. It never invents a command, never
+runs anything the model did not write, and never deletes output — the full log
+is always persisted for slow runs.
+
+**Does it replace pi's built-in tools?** It re-registers their definitions with
+a small `prepareArguments` / `execute` shim, keeping the original schema and
+behavior. Disable the extension and the built-in tools are untouched.
+
+**Why strip `head`/`tail`/`grep` but not `sed`/`jq`?** View extractors only
+*filter* the stream, so removing and re-applying one is lossless. Transform
+extractors *change* the data; stripping them would silently drop the
+transformation. The guard leaves them in the shell.
+
+**What happens to the output the model didn't ask for?** For fast commands it
+never leaves the process. For slow commands it is written to
+`pi-bash-guard-<hex>.log` and pointed at by a Full-Output Readback notice, so
+the model can `read` it on demand instead of re-running an expensive command.
+
+**Does it work with other extensions?** Yes — it publishes
+`details.piToolGuard` so downstream consumers such as SoL-Pi's
+evidence-preserving reducer can interoperate, and it never scans sessions or
+mutates other tools.
+
+**Does it need configuration?** No. Install and it works. `FAST_THRESHOLD_MS`
+(10 s) and `FULL_OUTPUT_TTL_MS` (24 h) are the only tunables, both internal
+constants today.
+
+## Related pi extensions
+
+- [pi-codemode-guard](https://github.com/tychenjiajun/pi-codemode-guard) —
+  compiles LLM-written codemode scripts before they reach the sandbox.
+- [pi-codemode-snippets](https://github.com/tychenjiajun/pi-codemode-snippets) —
+  turns a `// @snippet:` `.js` file into a named, composable pi tool.
+- [pi-skill-guard](https://github.com/tychenjiajun/pi-skill-guard) —
+  guards skill loading and invocation.
+- [pi-voice](https://github.com/tychenjiajun/pi-voice) — speech input for pi.
+- [SoL-Pi](https://github.com/NVlabs/SoL-Pi) — evidence-preserving context
+  reduction; reads this extension's `details.piToolGuard` contract.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm test        # Run all tests
-pnpm typecheck   # Type check
+pnpm test        # 260 unit tests
+pnpm typecheck
+pi -e .          # load this checkout as an extension for one session
 ```
+
+Layout and design notes live in [`AGENTS.md`](./AGENTS.md) and
+[`CONTEXT.md`](./CONTEXT.md). Pi's own documentation:
+[Extensions](https://pi.dev/docs/latest/extensions) ·
+[Pi packages](https://pi.dev/docs/latest/packages).
 
 ## License
 

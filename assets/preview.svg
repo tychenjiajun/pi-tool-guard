@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+  <title>pi-tool-guard — a pi extension that repairs LLM tool calls and strips trailing head/tail/grep pipeline extractors from bash</title>
+  <desc>pi-tool-guard normalizes argument aliases for edit/write/read before schema validation and projects noisy bash output through the trailing view extractor the model actually asked for, cutting a 1,462-line log to the 20 lines it reads.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c0b14"/>
+      <stop offset="0.55" stop-color="#110f1d"/>
+      <stop offset="1" stop-color="#0d0c17"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7c3aed" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#0ea5e9" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#0ea5e9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.03"/>
+    </linearGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.5" fill="#ffffff" opacity="0.05"/>
+    </pattern>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"/>
+    </marker>
+    <style>
+      .code { font-family: ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace; font-size: 15.5px; }
+      .kw   { fill: #c792ea; }
+      .fn   { fill: #82aaff; }
+      .str  { fill: #7ee787; }
+      .num  { fill: #f2cc60; }
+      .pun  { fill: #8b849c; }
+      .pl   { fill: #e6e1f5; }
+      .cm   { fill: #6b7391; }
+      .key  { fill: #79c0ff; }
+    </style>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <ellipse cx="1060" cy="40" rx="460" ry="320" fill="url(#glowA)"/>
+  <ellipse cx="120" cy="600" rx="420" ry="300" fill="url(#glowB)"/>
+  <rect width="1200" height="630" fill="url(#dots)"/>
+
+  <!-- header -->
+  <rect x="60" y="44" width="146" height="32" rx="16" fill="#7c3aed" fill-opacity="0.14" stroke="#7c3aed" stroke-opacity="0.7"/>
+  <text x="133" y="65" font-size="14" font-weight="700" fill="#c4b5fd" text-anchor="middle" letter-spacing="0.5">pi extension</text>
+  <text x="1140" y="65" font-size="14" font-weight="600" fill="#6f6a85" text-anchor="end" letter-spacing="0.5">MIT · TypeScript strict · 260 tests</text>
+
+  <!-- title -->
+  <text x="60" y="140" font-size="46" font-weight="800" fill="#f6f4ff" letter-spacing="-0.5">pi-tool-guard</text>
+  <text x="61" y="178" font-size="19" fill="#9a94b3">Repairs <tspan fill="#a78bfa" font-weight="600">LLM tool calls</tspan> before they fail — aliases for edit/write/read, view projection for bash</text>
+
+  <!-- left: bloated output -->
+  <g filter="url(#soft)">
+    <rect x="60" y="215" width="470" height="250" rx="16" fill="#0f0e18" stroke="#2b2745" stroke-width="1.5"/>
+  </g>
+  <path d="M60,231 a16,16 0 0 1 16,-16 h438 a16,16 0 0 1 16,16 v24 h-470 z" fill="#1a1828"/>
+  <line x1="60" y1="255" x2="530" y2="255" stroke="#2b2745" stroke-width="1.5"/>
+  <text x="86" y="240" class="code" font-size="13.5" fill="#8f89a8">model asks for 20 lines…</text>
+  <text x="86" y="292" class="code" xml:space="preserve"><tspan class="pl">npm test 2&gt;&amp;1 | </tspan><tspan class="kw">head -20</tspan></text>
+  <text x="86" y="330" class="code" font-size="13.5" fill="#f87171">1,462 lines returned</text>
+  <text x="86" y="352" class="code" font-size="13.5" fill="#6f6a85">16.1 KiB of log in context</text>
+  <text x="86" y="384" class="code" font-size="13.5" fill="#6f6a85">the lines the model wanted</text>
+  <text x="86" y="406" class="code" font-size="13.5" fill="#6f6a85">are buried under node_modules</text>
+  <text x="86" y="428" class="code" font-size="13.5" fill="#6f6a85">and stack traces</text>
+
+  <!-- arrow -->
+  <line x1="540" y1="340" x2="600" y2="340" stroke="#a78bfa" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- right: guard receipt -->
+  <g filter="url(#soft)">
+    <rect x="612" y="215" width="528" height="250" rx="16" fill="#0f0e18" stroke="#3b3566" stroke-width="1.5"/>
+  </g>
+  <path d="M612,231 a16,16 0 0 1 16,-16 h496 a16,16 0 0 1 16,16 v24 h-528 z" fill="#1a1828"/>
+  <line x1="612" y1="255" x2="1140" y2="255" stroke="#3b3566" stroke-width="1.5"/>
+  <text x="638" y="240" class="code" font-size="13.5" fill="#8f89a8">what the sandbox sends</text>
+
+  <text x="638" y="292" class="code" font-size="15"><tspan fill="#f5b642">🛡</tspan><tspan fill="#c4b5fd" font-weight="700"> pi-tool-guard</tspan><tspan class="cm"> · head -20</tspan></text>
+  <text x="638" y="324" class="code" font-size="14" fill="#7ee787">Context saved · 1,462 → 20 lines</text>
+  <text x="638" y="346" class="code" font-size="14" fill="#7ee787">· 99% smaller · 15.9 KiB saved</text>
+  <text x="638" y="380" class="code" font-size="14"><tspan class="cm">Took </tspan><tspan class="pl">4.3s</tspan><tspan class="pl">  </tspan><tspan fill="#a78bfa">██████████████</tspan><tspan fill="#f5b642">░░</tspan></text>
+
+  <!-- bottom stats -->
+  <g opacity="0.96">
+    <rect x="60" y="497" width="240" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <text x="86" y="528" font-size="24" font-weight="800" fill="#f6f4ff">2,200+</text>
+    <text x="86" y="550" font-size="13.5" fill="#8f89a8">projections applied in real sessions</text>
+
+    <rect x="326" y="497" width="240" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <text x="352" y="528" font-size="24" font-weight="800" fill="#f6f4ff">59%</text>
+    <text x="352" y="550" font-size="13.5" fill="#8f89a8">fewer output lines reaching the model</text>
+
+    <rect x="592" y="497" width="240" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <text x="618" y="528" font-size="24" font-weight="800" fill="#f6f4ff">+33ms</text>
+    <text x="618" y="550" font-size="13.5" fill="#8f89a8">median extractor overhead</text>
+
+    <rect x="858" y="497" width="282" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <text x="884" y="528" font-size="24" font-weight="800" fill="#f6f4ff">0</text>
+    <text x="884" y="550" font-size="13.5" fill="#8f89a8">bytes hidden — full output stays on disk</text>
+  </g>
+</svg>
