@@ -1,6 +1,6 @@
 # pi-tool-guard
 
-English | [简体中文](./README.zh-CN.md)
+English | [简体中文](./docs/README.zh-CN.md)
 
 <p align="center">
   <img src="./assets/preview.svg" alt="pi-tool-guard runs an expensive bash command once, keeps its full log on disk, and returns only the head/tail/grep projection the model asked for" width="880">

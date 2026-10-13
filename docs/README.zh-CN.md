@@ -1,18 +1,18 @@
 # pi-tool-guard
 
-[English](./README.md) | 简体中文
+[English](../README.md) | 简体中文
 
 <p align="center">
-  <img src="./assets/preview.svg" alt="pi-tool-guard 让昂贵的 bash 命令只跑一次，把完整日志留在磁盘上，只返回模型所要的 head/tail/grep 投影" width="880">
+  <img src="../assets/preview.svg" alt="pi-tool-guard 让昂贵的 bash 命令只跑一次，把完整日志留在磁盘上，只返回模型所要的 head/tail/grep 投影" width="880">
 </p>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![npm](https://img.shields.io/npm/v/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![Release](https://img.shields.io/github/v/release/tychenjiajun/pi-tool-guard)](https://github.com/tychenjiajun/pi-tool-guard/releases/latest)
 [![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
 [![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](./tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen.svg)](./package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](../tsconfig.json)
+[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen.svg)](../package.json)
 [![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
@@ -388,7 +388,7 @@ pnpm typecheck
 pi -e .          # 把本检出作为扩展加载，仅本次会话
 ```
 
-架构与设计说明见 [`AGENTS.md`](./AGENTS.md) 与 [`CONTEXT.md`](./CONTEXT.md)。pi
+架构与设计说明见 [`AGENTS.md`](../AGENTS.md) 与 [`CONTEXT.md`](../CONTEXT.md)。pi
 官方文档：[扩展](https://pi.dev/docs/latest/extensions) ·
 [Pi 包](https://pi.dev/docs/latest/packages)。
 
