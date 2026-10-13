@@ -12,7 +12,7 @@ English | [简体中文](./docs/README.zh-CN.md)
 [![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
 [![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](./tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen.svg)](./package.json)
+[![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen.svg)](./package.json)
 [![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
@@ -251,6 +251,17 @@ bash exits with *that* statement's status, so the guard projects instead of
 throwing. An empty inline projection renders as `(no output)`, matching pi's
 own empty-result rendering.
 
+Pi's bash never throws for a non-zero exit (pi ≥ 0.99): it resolves with
+`isError: true` and appends `Command exited with code N` to the content. That
+status belongs to the *cleaned* command, so the guard strips it before the view
+sees the output and reports the **view's** exit — what pi itself would report
+for `cmd | view`. When nothing re-decides it (a statement after the window, or
+a view that never ran) the status line and `isError` flag are kept exactly as
+pi wrote them. The `structuredContent` payload of pi's bash `outputSchema` is
+re-stamped around the projection (`output`, `exit_code`, `wall_time_seconds`)
+instead of dropped; `truncated`/`full_output_path` still point at the
+unprojected log.
+
 ### Fast and slow paths
 
 | Command | Behavior |
@@ -346,9 +357,12 @@ Bash flow:
    `pi.exec`. Fast + inline → pipe the result through the extractor.
 4. Slow → persist the full, unextracted output, project, and append the
    Full-Output Readback notice.
-5. Non-zero exit → recover the output and `Full output: <path>` pointer from
-   the error, apply the view, and throw a message carrying the projection plus
-   `[Command exited with code N. Full output: <path>]`.
+5. Non-zero exit → pi resolves an `isError` result ending in
+   `Command exited with code N` (it never throws for exit codes). The guard
+   strips that status, applies the view, and reports the **view's** exit —
+   pi's own semantics for `cmd | view`. A non-zero *view* throws the
+   projection plus `[Command exited with code N. Full output: <path>]`;
+   thrown errors without an exit code (timeout/abort) are rethrown unchanged.
 
 ## Compatibility and limitations
 
@@ -361,6 +375,14 @@ Documented, intentional behaviors — not bugs:
 - **Live stream.** During a fast run pi's `onUpdate` stream shows the cleaned
   command's unfiltered output; only the returned content is the projection.
 - **Error path has no contract.** A thrown error cannot carry `details`.
+- **Exit status follows the view.** A failed command's
+  `Command exited with code N` line is stripped before projecting; the result
+  reports the view's exit, as a native `cmd | view` pipeline would. With a
+  statement after the window the status is kept as pi wrote it.
+- **`structuredContent` is re-stamped, not dropped.** The bash `outputSchema`
+  payload keeps `truncated`/`full_output_path` (the unprojected log) and takes
+  the projected `output`, the view's `exit_code`, and the guarded run's
+  `wall_time_seconds`.
 - **Transform extractors are never stripped.** `sed`, `awk`, `jq`, `sort`, …
   stay in the command on purpose.
 - **No session scanning and no replay.** Every invocation executes the command
@@ -420,7 +442,7 @@ constants today.
 
 ```bash
 pnpm install
-pnpm test        # 260 unit tests
+pnpm test        # 268 unit tests
 pnpm typecheck
 pi -e .          # load this checkout as an extension for one session
 ```

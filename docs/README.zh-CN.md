@@ -12,7 +12,7 @@
 [![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
 [![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](../tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen.svg)](../package.json)
+[![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen.svg)](../package.json)
 [![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
@@ -234,6 +234,14 @@ cd x && { echo "=== build ==="
 （`cmd | grep x; echo done`），bash 以*那条*语句的状态退出，因此 guard 返回投影
 而不抛错。空的内联投影渲染为 `(no output)`，与 pi 自身的空结果渲染一致。
 
+pi 的 bash 从不因非零退出抛错（pi ≥ 0.99）：它以 `isError: true` 返回，内容末尾
+追加 `Command exited with code N`。该状态属于*清洗后的*命令，因此 guard 会在视图
+读取输出前把它剥离，并报告**视图**的退出码——与 pi 自己对 `cmd | view` 的语义
+一致。当没有东西可以重新裁定时（窗口后还有语句，或视图根本没运行），状态行与
+`isError` 标志按 pi 给出的原样保留。pi bash `outputSchema` 的 `structuredContent`
+会被围绕投影重新盖章（`output`、`exit_code`、`wall_time_seconds`）而非丢弃；
+`truncated`/`full_output_path` 仍指向未投影的完整日志。
+
 ### 快速与慢速路径
 
 | 命令 | 行为 |
@@ -322,8 +330,11 @@ Bash 流程：
 3. 快速 + 已截断 → 通过 `pi.exec` 对 pi 的完整输出文件运行提取器。快速 + 内联 →
    将结果通过管道传给提取器。
 4. 慢速 → 持久化完整的、未提取的输出，投影，并附加完整输出回读通知。
-5. 非零退出 → 从错误中恢复输出与 `Full output: <path>` 指针，应用视图，抛出
-   携带投影文本与 `[Command exited with code N. Full output: <path>]` 的错误。
+5. 非零退出 → pi 以 `isError` 结果返回，内容末尾是
+   `Command exited with code N`（它从不因退出码抛错）。guard 剥离该状态、应用视图，
+   并报告**视图**的退出码——与 pi 自身对 `cmd | view` 的语义一致。*视图*非零会抛出
+   携带投影与 `[Command exited with code N. Full output: <path>]` 的错误；
+   不带退出码的抛出错误（超时/中止）原样重抛。
 
 ## 兼容性与局限性
 
@@ -335,6 +346,12 @@ Bash 流程：
 - **实时流。** 快速运行期间 pi 的 `onUpdate` 流显示清洗后命令的未过滤输出；只有
   返回的内容是投影。
 - **错误路径无契约。** 抛出的错误无法携带 `details`。
+- **退出状态跟随视图。** 失败命令的 `Command exited with code N` 行在投影前被剥离；
+  结果报告视图的退出码，与原生 `cmd | view` 管道一致。窗口后还有语句时，状态按
+  pi 写入的原样保留。
+- **`structuredContent` 被重新盖章而非丢弃。** bash `outputSchema` 载荷保留
+  `truncated`/`full_output_path`（未投影的完整日志），并取投影后的 `output`、
+  视图的 `exit_code` 与整个受守护运行的 `wall_time_seconds`。
 - **转换提取器永不剥离。** `sed`、`awk`、`jq`、`sort`…… 有意留在命令里。
 - **不扫描会话、不重放。** 每次调用都重新执行命令；guard 从不返回缓存结果。
 
@@ -383,7 +400,7 @@ guard 把它们留给 shell。
 
 ```bash
 pnpm install
-pnpm test        # 260 个单元测试
+pnpm test        # 268 个单元测试
 pnpm typecheck
 pi -e .          # 把本检出作为扩展加载，仅本次会话
 ```

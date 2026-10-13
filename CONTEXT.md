@@ -61,7 +61,7 @@ Converting incorrect or alias field names to the canonical names expected by the
 _Avoid_: field mapping, alias resolution
 
 **Guard Contract**:
-The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output. Not published on the error (non-zero exit) path — a thrown error cannot carry `details`.
+The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output. Not published when the guard throws (a thrown error cannot carry `details`) — a non-zero *view* exit; a non-zero *cleaned* command whose exit the view re-decides still publishes the record, like any resolved result.
 _Avoid_: metadata blob, guard flag
 
 **Projection Applied**:
@@ -81,7 +81,7 @@ The **LLM Notice** appended to a **Slow Command**'s projected result. It inlines
 _Avoid_: cache hit, replay, memoization
 
 **Error (Non-zero Exit)**:
-When the cleaned command exits non-zero, pi's bash tool throws. The guard recovers the output and `Full output: <path>` pointer from that error, applies the stripped view extractor to the available full output, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. The same path handles a re-applied extractor that itself exits non-zero (e.g. `cmd | grep no-match`); its exit code is propagated to match pi's native `cmd | extractor` behavior. No Guard Contract is published on this path.
+When the cleaned command exits non-zero, pi's bash resolves an `isError` result (pi never throws for exit codes) whose content ends in `Command exited with code N`. That status describes the cleaned command, so the guard strips it before the view sees the output and reports the **view's** exit — pi's own semantics for `cmd | view`; when nothing re-decides it (a statement after the window, or a view that never ran) the status line and `isError` flag stay exactly as pi wrote them, and the Guard Contract is published like on any resolved result. pi's `structuredContent` (`outputSchema`) is re-stamped around the projection instead of dropped. When the *view* itself exits non-zero (e.g. `cmd | grep no-match`), the guard throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`; a thrown error that does carry an exit code (custom bash operations) is recovered the same way. No Guard Contract is published on a thrown path.
 _Avoid_: error projection, exit code recovery
 
 **Timing Split**:
@@ -107,9 +107,9 @@ _Avoid_: empty filter, redundant projection
 - **Hoisted Statements** shave their output into a **Side Channel** and the guard re-attaches it around the projection, so stdout, `&&` short-circuiting, `cd` effects and `$?` all stay exactly as the shell would have produced them
 - **Fast Commands** have view extractors piped through them (or run on `fullOutputPath` if truncated)
 - **Slow Commands** persist the full, unextracted output to a file, run the view extractor, and return the projected view + **Full-Output Readback** as an **LLM Notice**
-- **Error (Non-zero Exit)** recovers output from the thrown error, applies the view extractor, and throws a projected error with exit code + path
+- **Error (Non-zero Exit)** — pi resolves `isError` results (it never throws for exit codes): the guard strips the cleaned command's status line, reports the **view's** exit, and keeps the status + flag only when nothing re-decides them; a non-zero **view** throws a projected error with exit code + path
 - **Truncation** is independent of speed — a fast command can be truncated, a slow command may not be
-- The **Guard Contract** is stamped only when view extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while always keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too; no contract is published on the error path
+- The **Guard Contract** is stamped only when view extractors were stripped; a **Projection Applied** outcome applies guard's projection as a fallback while always keeping `fullOutputPath` so a reducer can override, and a **Full Output** outcome keeps it too; no contract is published when the guard throws
 - A **Timing Split** rides on the **Guard Contract**; it is rendered only for a **Slow Command** when `extractorMs > 0` (a projection actually ran)
 - A **Guard Receipt** bundles the **Timing Split** with **Projection Stats**; it replaces pi's `Took` line only for a **Slow Command** whose projection changed the output — **Fast Commands** keep pi's plain line
 - A **No-op Projection** is a **Projection Applied** that leaves the output unchanged (inline projections only), so guard suppresses both its **Notice** and its **Guard Receipt** while still publishing the contract
@@ -123,7 +123,7 @@ _Avoid_: empty filter, redundant projection
 > **Domain expert:** "It's a slow command. The guard strips `tail`, persists the full, unextracted output to a temp file, runs `tail` on it, and returns the projected view to the LLM with a **Full-Output Readback** notice: the notice inlines the file path and tells the agent to read it on demand instead of re-running. It also shows a UI notice and stamps the **Guard Contract** with outcome **Projection Applied**, so a downstream reducer can archive the full log via `fullOutputPath`. The guard does not replay runs — a later identical `npm test` executes again."
 >
 > **Dev:** "And if it exits non-zero?"
-> **Domain expert:** "The guard recovers the output and `Full output: <path>` from the error, applies the stripped view extractor, and throws an error whose message is the projected text followed by `[Command exited with code N. Full output: <path>]`. No Guard Contract is published on this path — a thrown error cannot carry `details`."
+> **Domain expert:** "pi doesn't throw for exit codes — it resolves an `isError` result ending in `Command exited with code N`. The guard strips that status (it describes the cleaned command, not the pipeline), applies the stripped view extractor, and reports the view's exit, publishing the **Guard Contract** like any resolved result. Only a non-zero *view* throws: the projected text followed by `[Command exited with code N. Full output: <path>]` — no contract on a thrown path, since a thrown error cannot carry `details`."
 >
 > **Dev:** "And if it finishes in 2 seconds?"
 > **Domain expert:** "**Projection Applied**: the guard runs `tail` on the result as a fallback, but keeps `fullOutputPath`, so a reducer that understands the contract (or just reads **Source Path**) can override guard's projection with an evidence-checked receipt for the full log."
