@@ -3,7 +3,7 @@
 [English](./README.md) | 简体中文
 
 <p align="center">
-  <img src="./assets/preview.svg" alt="pi-tool-guard 在 LLM 工具调用失败前修复它：edit/write/read 的参数别名，以及 bash 尾部的 head/tail/grep 管道提取器" width="880">
+  <img src="./assets/preview.svg" alt="pi-tool-guard 让昂贵的 bash 命令只跑一次，把完整日志留在磁盘上，只返回模型所要的 head/tail/grep 投影" width="880">
 </p>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -17,20 +17,42 @@
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
 
-> **一句话：** *模型与工具之间的防御层——把模型写错的参数字段名改回来，
-> 并把一条嘈杂的 bash 管道变成模型真正想要的那段视图，同时完整输出始终
-> 只差一次 `read`。*
+> **一句话：** *pi-tool-guard 让一条昂贵的 bash 命令**只跑一次**，把完整日志
+> 留在磁盘上，只把模型所要的 `head`/`tail`/`grep` 视图返回给它，并告诉它去读
+> 日志、而不是花时间重跑命令。*
 
 **pi-tool-guard** 是一个开源（MIT）、TypeScript 编写的
-[pi](https://github.com/earendil-works/pi) AI 编码代理扩展。它覆盖 pi 内置的
-`edit`、`write`、`read`、`bash` 工具，并在调用**到达工具之前**修复两类最常见
-的 LLM 代理故障：
+[pi](https://github.com/earendil-works/pi) AI 编码代理扩展。它的核心价值就是
+每个批处理工具的核心价值：**一件昂贵的工作应该只跑一次，留下一份可查阅的日志
+——而不是一条需要反复重跑的命令。** 同时它还在调用到达工具之前修复两类最常见
+的 LLM 工具调用错误。
+
+## 核心思路：慢命令就是一次批处理作业
+
+agent 最昂贵的一次操作，是对 monorepo 跑五分钟的构建、测试或 `rg`；最浪费的
+操作，则是紧接着为了看一眼输出的另一段而把它重跑一遍。
+
+pi 内置的 bash 工具只有在结果超过 50 KB / 2000 行时才会保留完整输出文件。
+**pi-tool-guard 会为每一条慢命令保留它**，于是跑完的命令变成一份耐久产物，而
+不是要付两次的费用：
+
+| 步骤 | guard 做什么 |
+|---|---|
+| **1. 只跑一次** | 清洗后的命令只执行一次。 |
+| **2. 留住日志** | 完整的、未提取的输出写入 OS 临时目录的 `pi-bash-guard-<hex>.log`——即使 pi 本不会截断。 |
+| **3. 返回视图** | 模型得到的正是它所要求的那段 `head`/`tail`/`grep` 投影。 |
+| **4. 读，而不是重跑** | **完整输出回读**通知内联路径，并告知按需读取——`read` 工具配合 offset/limit，或 `sed -n 'START,ENDp' <path>`——而不是重跑命令。 |
+
+省下的是墙钟时间，不只是 token：agent 可以翻阅或 grep 一份跑完的批处理日志，
+而不必再付一次费用。guard 从不伪造缓存结果——新的调用仍会执行命令——但被持久化
+的日志让重跑变得没有必要，这正是重点。
+
+除日志之外，guard 还在调用**到达工具之前**修复两类最常见的 LLM 工具调用错误：
 
 1. **参数名写错**（`file` 而非 `path`、`old_str` 而非 `oldText`、`contents`
    而非 `content`……）；
 2. **bash 输出过大**——模型追加了 `| head -30` 或 `| grep FAIL | tail -5`，
-   shell 确实应用了它，但 guard 还会持久化完整的、未提取的日志，让上下文只为
-   投影付费，而信息一个字节都不丢。
+   guard 应用这段投影，而完整日志留在磁盘上。
 
 无需重新提示、无需重试、不会出现 `Error: invalid arguments`。只要模型能发起
 调用，guard 就让它通过。
@@ -126,7 +148,9 @@ Tests  12 failed | 4 passed (16)
 
 最常见的被剥离管道是 `head -40`、`head -20`、`head -30`、`tail -20` 和
 `grep -v node_modules`；单次最大投影把一份 **1462 行**的日志压到模型所要的
-**20 行**。guard 从不删除任何一个字节：完整日志留在磁盘上，只差一次 `read`。
+**20 行**。guard 从不删除任何一个字节：每条慢命令都会保留一份完整批处理日志，
+不受 pi 截断限制约束，因此 agent 可以重读一次已完成运行的任意片段，而不必再付
+一次费用。
 
 ## 参数别名规范化
 
@@ -318,6 +342,10 @@ guard 把它们留给 shell。
 **模型没要的那部分输出去哪了？** 快速命令中它从未离开进程。慢速命令中它被写入
 `pi-bash-guard-<hex>.log`，并由完整输出回读通知指向，模型可以按需 `read`，而
 不是重跑昂贵命令。
+
+**这和 pi 内置的 `fullOutputPath` 有什么区别？** pi 只在结果大到需要截断时才写
+这个文件。一条慢命令若视图藏住了关键行、但完整输出仍不足 50 KB，原本就完全
+没有完整日志。guard 会为**每一条**慢命令写一份，因此未投影的输出始终可读。
 
 **能与其他扩展共存吗？** 可以——它发布 `details.piToolGuard`，让 SoL-Pi 的证据
 保留 reducer 等下游消费者互操作；它从不扫描会话，也不改动其他工具。

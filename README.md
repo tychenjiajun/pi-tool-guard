@@ -3,7 +3,7 @@
 English | [简体中文](./README.zh-CN.md)
 
 <p align="center">
-  <img src="./assets/preview.svg" alt="pi-tool-guard repairs LLM tool calls before they fail: argument aliases for edit/write/read and trailing head/tail/grep pipeline extractors for bash" width="880">
+  <img src="./assets/preview.svg" alt="pi-tool-guard runs an expensive bash command once, keeps its full log on disk, and returns only the head/tail/grep projection the model asked for" width="880">
 </p>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -17,22 +17,47 @@ English | [简体中文](./README.zh-CN.md)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
 
-> **In one sentence:** *the defensive layer between the model and its tools —
-> it renames the argument fields the model got wrong and turns a noisy bash
-> pipeline into the view the model actually asked for, while keeping the full
-> output one `read` away.*
+> **In one sentence:** *pi-tool-guard runs an expensive bash command **once**,
+> keeps its full log on disk, returns only the `head`/`tail`/`grep` view the
+> model asked for, and tells it to read the log instead of paying to run the
+> command again.*
 
 **pi-tool-guard** is an open-source (MIT), TypeScript extension for the
-[pi](https://github.com/earendil-works/pi) AI coding agent. It overrides pi's
-built-in `edit`, `write`, `read`, and `bash` tools and repairs two of the most
-common LLM agent failures **before they reach the tool**:
+[pi](https://github.com/earendil-works/pi) AI coding agent. Its core value is
+the one every batch tool has: **an expensive job should be run once and leave a
+log you can inspect — not a command you have to repeat.** It also repairs two of
+the most common LLM tool-call mistakes before they reach the tool.
+
+## The core idea: a slow command is a batch job
+
+The most expensive thing an agent does is a five-minute build, test, or `rg`
+over a monorepo — and the most wasteful thing it does is immediately re-run that
+command just to see a different slice of the output.
+
+Pi's built-in bash tool only keeps a full-output file when the result exceeds
+50 KB / 2,000 lines. **pi-tool-guard keeps it for every slow command**, so a
+finished run becomes a durable artifact instead of a cost paid twice:
+
+| Step | What the guard does |
+|---|---|
+| **1. Run once** | The cleaned command executes a single time. |
+| **2. Keep the log** | The full, unextracted output is written to `pi-bash-guard-<hex>.log` in the OS temp dir — even when Pi would not have truncated it. |
+| **3. Return the view** | The model gets exactly the `head`/`tail`/`grep` projection it asked for. |
+| **4. Read, don't re-run** | A **Full-Output Readback** notice inlines the path and says to read it on demand — the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — instead of re-running the command. |
+
+The win is wall-clock time, not just tokens: the agent can page or grep through a
+finished batch run instead of paying for it again. The guard never fabricates a
+cached result — a fresh invocation still executes the command — but the
+persisted log makes re-running unnecessary, which is the point.
+
+Beyond the log, the guard also fixes two of the most common LLM tool-call
+mistakes **before they reach the tool**:
 
 1. **wrong argument names** (`file` instead of `path`, `old_str` instead of
    `oldText`, `contents` instead of `content`, …), and
 2. **oversized bash output** — the model appends `| head -30` or `| grep FAIL |
-   tail -5`, the shell *does* apply it, but the guard also persists the full,
-   unextracted log so nothing is lost while the context only pays for the
-   projection.
+   tail -5`, and the guard applies that projection while the full log stays on
+   disk.
 
 No re-prompt, no retry, no `Error: invalid arguments`. If the model can call the
 tool at all, the guard makes the call go through.
@@ -134,7 +159,9 @@ guarded bash calls):
 The most common stripped pipelines were `head -40`, `head -20`, `head -30`,
 `tail -20`, and `grep -v node_modules`; the largest single projection took a
 **1,462-line** log down to the **20 lines** the model asked for. The guard never
-deletes a byte: the full log stays on disk and is one `read` away.
+deletes a byte: every slow command keeps a full batch log regardless of Pi's
+truncation limit, so the agent can re-read any section of a finished run instead
+of paying for it again.
 
 ## Argument alias normalization
 
@@ -350,6 +377,12 @@ transformation. The guard leaves them in the shell.
 never leaves the process. For slow commands it is written to
 `pi-bash-guard-<hex>.log` and pointed at by a Full-Output Readback notice, so
 the model can `read` it on demand instead of re-running an expensive command.
+
+**How is this different from pi's built-in `fullOutputPath`?** Pi only writes
+that file when a result is large enough to truncate. A slow command whose view
+hid interesting lines — but whose full output was still under 50 KB — would
+otherwise leave no complete log at all. The guard writes one for **every** slow
+command, so the un-projected output is always there to read.
 
 **Does it work with other extensions?** Yes — it publishes
 `details.piToolGuard` so downstream consumers such as SoL-Pi's

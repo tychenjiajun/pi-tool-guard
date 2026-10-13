@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
-  <title>pi-tool-guard — a pi extension that repairs LLM tool calls and strips trailing head/tail/grep pipeline extractors from bash</title>
-  <desc>pi-tool-guard normalizes argument aliases for edit/write/read before schema validation and projects noisy bash output through the trailing view extractor the model actually asked for, cutting a 1,462-line log to the 20 lines it reads.</desc>
+  <title>pi-tool-guard — runs an expensive bash command once, keeps its full log on disk, and returns only the projection the model asked for</title>
+  <desc>pi-tool-guard treats a slow bash command like a batch job: it runs the cleaned command once, keeps the full unextracted log in a pi-bash-guard temp file even when pi would not truncate, returns the head/tail/grep projection the model asked for, and tells the model to read the log instead of paying to re-run the command.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -55,7 +55,7 @@
 
   <!-- title -->
   <text x="60" y="140" font-size="46" font-weight="800" fill="#f6f4ff" letter-spacing="-0.5">pi-tool-guard</text>
-  <text x="61" y="178" font-size="19" fill="#9a94b3">Repairs <tspan fill="#a78bfa" font-weight="600">LLM tool calls</tspan> before they fail — aliases for edit/write/read, view projection for bash</text>
+  <text x="61" y="178" font-size="19" fill="#9a94b3">Run an expensive bash command <tspan fill="#a78bfa" font-weight="600">once</tspan> — keep the log, return only the projection</text>
 
   <!-- left: bloated output -->
   <g filter="url(#soft)">
@@ -86,6 +86,7 @@
   <text x="638" y="324" class="code" font-size="14" fill="#7ee787">Context saved · 1,462 → 20 lines</text>
   <text x="638" y="346" class="code" font-size="14" fill="#7ee787">· 99% smaller · 15.9 KiB saved</text>
   <text x="638" y="380" class="code" font-size="14"><tspan class="cm">Took </tspan><tspan class="pl">4.3s</tspan><tspan class="pl">  </tspan><tspan fill="#a78bfa">██████████████</tspan><tspan fill="#f5b642">░░</tspan></text>
+  <text x="638" y="416" class="code" font-size="13.5" fill="#79c0ff">Log kept · read any slice — no re-run</text>
 
   <!-- bottom stats -->
   <g opacity="0.96">
@@ -102,7 +103,7 @@
     <text x="618" y="550" font-size="13.5" fill="#8f89a8">median extractor overhead</text>
 
     <rect x="858" y="497" width="282" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
-    <text x="884" y="528" font-size="24" font-weight="800" fill="#f6f4ff">0</text>
-    <text x="884" y="550" font-size="13.5" fill="#8f89a8">bytes hidden — full output stays on disk</text>
+    <text x="884" y="528" font-size="24" font-weight="800" fill="#f6f4ff">1×</text>
+    <text x="884" y="550" font-size="13.5" fill="#8f89a8">slow command run once — log kept on disk</text>
   </g>
 </svg>
