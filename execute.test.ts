@@ -712,3 +712,128 @@ describe("executeBashGuarded persist-failure fallback", () => {
     expect(mockCtx.ui.notify).toHaveBeenCalled();
   }, 30000);
 });
+
+// -------------------------------------------------------------------------
+// pi's resolved non-zero exits: bash returns `isError` results instead of
+// throwing (pi 0.99+/1.2.0) and stamps `structuredContent` for its
+// `outputSchema` (c.codemode/programmatic callers).
+// -------------------------------------------------------------------------
+
+describe("executeBashGuarded resolved isError results", () => {
+  it("keeps the cleaned command's status line out of the projection", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "FAIL a\nFAIL b\n\nCommand exited with code 1" }],
+      details: undefined,
+      isError: true,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: "FAIL b",
+    });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "npm test | grep FAIL" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // The extractor never sees pi's status line…
+    expect(mockPi.exec).toHaveBeenCalledWith("bash", [
+      "-c",
+      expect.stringContaining('"$1"'),
+      "bash",
+      "FAIL a\nFAIL b",
+    ]);
+    // …and the pipeline reports the view's exit (0), as pi would for
+    // `npm test | grep FAIL` when the grep matched.
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]).toEqual({ type: "text", text: "FAIL b" });
+    expect(readPiToolGuardDetails(result.details)?.outcome).toBe("projection-applied");
+  });
+
+  it("re-stamps structuredContent around the projection", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "x\ny\n\nCommand exited with code 1" }],
+      details: undefined,
+      isError: true,
+      structuredContent: {
+        output: "x\ny",
+        truncated: true,
+        full_output_path: "/tmp/pi-bash-abc.log",
+        exit_code: 1,
+        wall_time_seconds: 0.2,
+      },
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, stdout: "y" });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "npm test | grep y" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // The bash `outputSchema` payload survives the guard: output becomes the
+    // projection, exit_code the view's exit, wall time the guarded run — and
+    // the truncation pointers to the unprojected log are kept as pi wrote them.
+    expect(result.structuredContent).toMatchObject({
+      output: "y",
+      truncated: true,
+      full_output_path: "/tmp/pi-bash-abc.log",
+      exit_code: 0,
+    });
+    expect(
+      (result.structuredContent as { wall_time_seconds: number }).wall_time_seconds,
+    ).toBeTypeOf("number");
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("keeps the status line and failure flag when the view never runs", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "boom\n\nCommand exited with code 1" }],
+      details: undefined,
+      isError: true,
+      structuredContent: {
+        output: "boom",
+        truncated: false,
+        exit_code: 1,
+        wall_time_seconds: 0.1,
+      },
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("exec failed"));
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "npm test | tail -5" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // Nothing re-decided the exit, so pi's failure signal stays intact.
+    expect(result.isError).toBe(true);
+    const first = result.content[0];
+    if (first.type !== "text") throw new Error("expected a text content block");
+    expect(first.text).toContain("Command exited with code 1");
+    expect(
+      (result.structuredContent as { exit_code: number }).exit_code,
+    ).toBe(1);
+  });
+
+  it("keeps the failure when a statement after the window owns the exit", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [{ type: "text", text: "out\n\nCommand exited with code 1" }],
+      details: undefined,
+      isError: true,
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, stdout: "out" });
+
+    const result = await executeBashGuarded(
+      ctx, "c1", { command: "npm test | head -2; false" },
+      new AbortController().signal, () => {}, {},
+    );
+
+    // The guard changed no exit semantics (the trailing `false` owns the
+    // status), so the flag pi resolved with is preserved.
+    expect(readPiToolGuardDetails(result.details)?.outcome).toBe("projection-applied");
+    expect(result.isError).toBe(true);
+  });
+});

@@ -19,6 +19,7 @@ import {
   sweepStaleFullOutputs,
   persistFullOutput,
   parseBashError,
+  splitExitStatus,
   joinOutputStreams,
   createSideChannelPath,
   resetSideChannel,
@@ -307,6 +308,38 @@ describe("parseBashError", () => {
     const parsed = parseBashError("raw string error");
     expect(parsed.exitCode).toBeUndefined();
     expect(parsed.text).toBe("raw string error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pi's resolved non-zero exits (isError results, pi 0.99+/1.2.0)
+// ---------------------------------------------------------------------------
+
+describe("splitExitStatus", () => {
+  it("splits pi's appended status off the output, byte-exact", () => {
+    // pi writes `${outputText}\n\n${status}` (appendStatus); the body must be
+    // the original outputText, trailing newline included.
+    expect(splitExitStatus("a\nb\n\n\nCommand exited with code 3")).toEqual({
+      body: "a\nb\n",
+      exitCode: 3,
+    });
+  });
+
+  it("handles a status-only result (command printed nothing)", () => {
+    expect(splitExitStatus("Command exited with code 1")).toEqual({
+      body: "",
+      exitCode: 1,
+    });
+  });
+
+  it("returns undefined when the text carries no status", () => {
+    expect(splitExitStatus("just output")).toBeUndefined();
+  });
+
+  it("strips only pi's trailing status, not an identical earlier line", () => {
+    expect(
+      splitExitStatus("Command exited with code 5\n\nCommand exited with code 5"),
+    ).toEqual({ body: "Command exited with code 5", exitCode: 5 });
   });
 });
 

@@ -292,6 +292,8 @@ export interface ParsedBashError {
 
 const BANNER_RE = /\n*\[Showing (?:last|lines)[^\]]*Full output:[^\]]*\]\s*$/m;
 const EXIT_CODE_RE = /\n*Command exited with code (\d+)\s*$/;
+/** pi's `appendStatus` shape: the status alone, or after two newlines. */
+const EXIT_STATUS_SUFFIX_RE = /(?:\n\n)?Command exited with code (\d+)\s*$/;
 
 /**
  * Parse a bash error message produced by pi's bash tool. Extracts the exit
@@ -314,4 +316,24 @@ export function parseBashError(err: unknown): ParsedBashError {
     ...(fullOutputPath ? { fullOutputPath } : {}),
     exitCode,
   };
+}
+
+/**
+ * Split pi's trailing `Command exited with code N` status off a resolved
+ * result's text.
+ *
+ * pi's bash tool never throws for a non-zero exit (0.99+/1.2.0): it resolves
+ * with `isError: true` and appends that status via `appendStatus` — after two
+ * newlines, or as the whole text when the command printed nothing. The line
+ * describes the command that actually ran; for the guard that is the *cleaned*
+ * command, while the pipeline the model wrote ends in the stripped view, whose
+ * exit is what pi would have reported. Returns `undefined` when the text
+ * carries no such status (the caller should then leave the text untouched).
+ */
+export function splitExitStatus(
+  text: string,
+): { body: string; exitCode: number } | undefined {
+  const match = text.match(EXIT_STATUS_SUFFIX_RE);
+  if (!match) return undefined;
+  return { body: text.slice(0, match.index), exitCode: Number(match[1]) };
 }

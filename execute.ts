@@ -20,6 +20,7 @@ import {
   runExtractorOnText,
   persistFullOutput,
   parseBashError,
+  splitExitStatus,
 } from "./bash.ts";
 import { formatProjectionSavings, measureText } from "./format.ts";
 import { showGuardStatus } from "./tui.ts";
@@ -37,6 +38,28 @@ import {
 // ---------------------------------------------------------------------------
 
 export type ToolResult = AgentToolResult<BashToolDetails | undefined>;
+
+/** The object shape pi's bash tool stamps as `structuredContent` (`outputSchema`). */
+type BashStructuredContent = {
+  output: string;
+  truncated: boolean;
+  full_output_path?: string;
+  exit_code: number;
+  wall_time_seconds: number;
+};
+
+/** Narrow `structuredContent` to pi's bash `outputSchema` payload. */
+function isBashStructuredContent(
+  value: ToolResult["structuredContent"],
+): value is BashStructuredContent {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    "output" in value &&
+    "exit_code" in value
+  );
+}
 
 export type GuardedBashToolDetails = BashToolDetails & {
   [PI_TOOL_GUARD_DETAILS_KEY]?: PiToolGuardDetails;
@@ -342,6 +365,21 @@ async function runGuardedBash(
   }
   const commandMs = Date.now() - commandStart;
 
+  // pi's bash resolves a non-zero exit instead of throwing: the result carries
+  // `isError: true` and its content ends in `Command exited with code N` —
+  // appended after two newlines (pi's `appendStatus`), or as the whole text
+  // when the command printed nothing. That status describes the command that
+  // ran — here, the *cleaned* command — while the pipeline the model wrote
+  // ends in the stripped view, whose exit is what pi would have reported for
+  // `cmd | view`. Split it off before anything consumes the text so it never
+  // reaches the extractor input, the persisted log, or the projected content.
+  const rawText = resultText(result);
+  const cleanedStatus =
+    result.isError === true && !stripped.hasFollowingStatement
+      ? splitExitStatus(rawText)
+      : undefined;
+  const sourceText = cleanedStatus ? cleanedStatus.body : rawText;
+
   const resultDetails = result.details as BashToolDetails | undefined;
   const fullOutputPath = resultDetails?.fullOutputPath;
   const isSlow = commandMs >= FAST_THRESHOLD_MS;
@@ -349,7 +387,7 @@ async function runGuardedBash(
   // F4: slow commands always get a persisted full-output file
   let sourcePath = fullOutputPath;
   if (isSlow && !sourcePath) {
-    sourcePath = persistFullOutput(resultText(result));
+    sourcePath = persistFullOutput(sourceText);
   }
 
   // Publish the guard's own persisted log as `details.fullOutputPath` when pi
@@ -369,13 +407,43 @@ async function runGuardedBash(
       : result;
 
   // Apply the stripped extractor pipeline to the full output (file or inline).
-  const inlineSource = sourcePath ? undefined : resultText(result);
+  const inlineSource = sourcePath ? undefined : sourceText;
   const extractorStart = Date.now();
   const extracted = sourcePath
     ? await runExtractorOnFile(ctx.pi, sourcePath, stripped.removedPipeline)
     : await runExtractorOnText(ctx.pi, inlineSource ?? "", stripped.removedPipeline);
   const extractorMs = Date.now() - extractorStart;
   const timing: PiToolGuardTiming = { commandMs, extractorMs, totalMs: commandMs + extractorMs };
+
+  // The view re-ran (or failed to), so the pipeline's exit is the view's exit
+  // whenever the view is the last command — pi would have reported the same
+  // (a non-zero view throws, see the exit-code check below). A failure nothing
+  // re-decided (a statement after the window, or a view that never ran) keeps
+  // pi's `isError` flag exactly as handed over.
+  const viewRan = extracted !== undefined;
+  const statusSplit = cleanedStatus !== undefined && viewRan;
+  const keepFailure = result.isError === true && !statusSplit;
+
+  /**
+   * Re-stamp pi's `structuredContent` — the bash tool's `outputSchema` payload
+   * (`{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`)
+   * that codemode scripts and other programmatic callers read — around the
+   * guard's decision instead of dropping it. `truncated` and `full_output_path`
+   * stay as pi wrote them: they still point at the unprojected log.
+   */
+  const restampStructuredContent = (
+    output: string | undefined,
+    exitCode: number | undefined,
+  ): ToolResult["structuredContent"] => {
+    const structured = resultWithPointer.structuredContent;
+    if (!isBashStructuredContent(structured)) return structured;
+    return {
+      ...structured,
+      ...(output !== undefined ? { output } : {}),
+      ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+      wall_time_seconds: Math.round(timing.totalMs / 100) / 10,
+    };
+  };
 
   // The projection branch is only safe when we either ran fast (inline) or
   // have a persisted full-output file to point the readback notice at.
@@ -455,10 +523,19 @@ async function runGuardedBash(
 
       const body = assemble(projectedText);
       const text = notices.length ? `${body}\n\n${notices.join("\n\n")}` : body;
+      const structuredContent = restampStructuredContent(
+        body,
+        // A status the guard split off is re-decided here: the view ran and
+        // exited 0 (a non-zero view threw above), so that is the pipeline's
+        // exit — without a split the original exit code already agrees.
+        cleanedStatus !== undefined ? extracted.code : undefined,
+      );
       return withGuardDetails(
         {
+          ...(keepFailure ? { isError: true } : {}),
           content: [{ type: "text" as const, text }],
           details: resultWithPointer.details,
+          ...(structuredContent !== undefined ? { structuredContent } : {}),
         },
         guardRecord(
           originalCommand,
@@ -484,13 +561,27 @@ async function runGuardedBash(
   const llmNotice = isSlow
     ? buildSlowReadbackNotice(originalCommand, sourcePath)
     : "The projection could not be applied; showing the full output.";
-  const fullBody = assemble(resultText(result));
+  // Keep the cleaned command's status line only while nothing re-decided the
+  // exit (the view never ran, or a statement after the window owns it);
+  // otherwise the shown text is the guarded output pi's own pipeline would
+  // have printed.
+  const shownText = statusSplit ? sourceText : rawText;
+  const fullBody = assemble(shownText);
+  const structuredContent = restampStructuredContent(
+    undefined,
+    statusSplit ? extracted?.code : undefined,
+  );
   return withGuardDetails(
     {
+      ...(keepFailure ? { isError: true } : {}),
       content: hasHoisted()
         ? [{ type: "text" as const, text: `${fullBody}\n\n${llmNotice}` }]
-        : [...result.content, { type: "text" as const, text: `\n\n${llmNotice}` }],
+        : [
+            ...(statusSplit ? [{ type: "text" as const, text: sourceText }] : result.content),
+            { type: "text" as const, text: `\n\n${llmNotice}` },
+          ],
       details: resultWithPointer.details,
+      ...(structuredContent !== undefined ? { structuredContent } : {}),
     },
     guardRecord(
       originalCommand,
