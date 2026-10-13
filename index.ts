@@ -101,7 +101,10 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
           theme,
           guard!,
           guard!.timing!,
-          context.state?.startedAt !== undefined,
+          // Pi's renderer prints its `Took` line when it has a recorded
+          // durationMs (survives session reloads, pi >= 1.1.0) or a live
+          // startedAt clock; only then is the trailing child safe to drop.
+          context.durationMs !== undefined || context.state?.startedAt !== undefined,
         );
         return component;
       },
