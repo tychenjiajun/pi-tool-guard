@@ -2,7 +2,7 @@
   "name": "pi-tool-guard",
   "version": "0.5.1",
   "type": "module",
-  "description": "Pi extension that runs an expensive bash command once and keeps its full log on disk, so the agent reads any slice instead of re-running it — and repairs LLM tool calls: argument aliases for edit/write/read, plus trailing head/tail/grep pipeline projection.",
+  "description": "Pi extension with two values: it runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, and it repairs LLM tool calls — argument aliases for edit/write/read plus trailing head/tail/grep pipeline extractors.",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts",

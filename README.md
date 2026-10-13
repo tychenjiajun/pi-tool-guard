@@ -17,28 +17,37 @@ English | [简体中文](./README.zh-CN.md)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
 
-> **In one sentence:** *pi-tool-guard runs an expensive bash command **once**,
-> keeps its full log on disk, returns only the `head`/`tail`/`grep` view the
-> model asked for, and tells it to read the log instead of paying to run the
-> command again.*
+> **In one sentence:** *pi-tool-guard gives every tool call two second chances —
+> a minutes-long command is run **once** and its full log kept so it is never
+> re-run just to see another slice; and a call with the wrong argument names is
+> rewritten, so it never fails.*
 
 **pi-tool-guard** is an open-source (MIT), TypeScript extension for the
-[pi](https://github.com/earendil-works/pi) AI coding agent. Its core value is
-the one every batch tool has: **an expensive job should be run once and leave a
-log you can inspect — not a command you have to repeat.** It also repairs two of
-the most common LLM tool-call mistakes before they reach the tool.
+[pi](https://github.com/earendil-works/pi) AI coding agent. It brings two
+independent values to every session, and both matter:
 
-## The core idea: a slow command is a batch job
+| # | The failure | What the guard does |
+|---|---|---|
+| **1. Expensive commands** | A `vitest` run takes minutes and prints the same lines over and over; you only want a few tests' results, and re-running to see them is pure waste. | Runs the cleaned command **once**, keeps the full log, returns just the `head`/`tail`/`grep` view that was asked for, and says to read the log instead of re-running. |
+| **2. Broken arguments** | The model knows what to do but guesses the field names — `file`, `old_str`, `contents`, a top-level `oldText` — and the call is rejected before it runs. | Rewrites the arguments to the canonical names **before schema validation** — no error, no retry. |
 
-The most expensive thing an agent does is a five-minute build, test, or `rg`
-over a monorepo — and the most wasteful thing it does is immediately re-run that
-command just to see a different slice of the output.
+## Value 1 — a slow command runs once, then you read its log
+
+`vitest` is the canonical case: minutes of repetitive per-test output, when what
+you really want is a handful of results inside it.
+
+```bash
+# the model writes
+npx vitest run 2>&1 | grep -E '✓|×|FAIL' | tail -40
+
+# the guard runs `npx vitest run` a single time, keeps every line in
+# pi-bash-guard-<hex>.log, and returns only the 40 matching lines.
+# Need another slice? grep the log — the multi-minute suite is never re-run.
+```
 
 Pi's built-in bash tool only keeps a full-output file when the result exceeds
 50 KB / 2,000 lines — and a `grep`/`head` view can still hide the lines it did
-not select. **pi-tool-guard keeps a full log for every slow command it
-projects**, so a finished run becomes a durable artifact instead of a cost paid
-twice:
+not select. The guard keeps a full log for every slow command it projects:
 
 | Step | What the guard does |
 |---|---|
@@ -47,37 +56,35 @@ twice:
 | **3. Return the view** | The model gets exactly the `head`/`tail`/`grep` projection it asked for. |
 | **4. Read, don't re-run** | A **Full-Output Readback** notice inlines the path and says to read it on demand — the `read` tool with offset/limit, or `sed -n 'START,ENDp' <path>` — instead of re-running the command. |
 
-The win is wall-clock time, not just tokens: the agent can page or grep through a
+The win is wall-clock time, not just tokens: the agent pages or greps through a
 finished batch run instead of paying for it again. The guard never fabricates a
 cached result — a fresh invocation still executes the command — but the
-persisted log makes re-running unnecessary, which is the point.
+persisted log makes re-running unnecessary, which is the point. This is the
+same trade a batch job makes: submit once, then read the log.
 
-Beyond the log, the guard also fixes two of the most common LLM tool-call
-mistakes **before they reach the tool**:
+## Value 2 — a broken tool call still goes through
 
-1. **wrong argument names** (`file` instead of `path`, `old_str` instead of
-   `oldText`, `contents` instead of `content`, …), and
-2. **oversized bash output** — the model appends `| head -30` or `| grep FAIL |
-   tail -5`, and the guard applies that projection while the full log stays on
-   disk.
+The model rarely gets the schema exactly right on the first try. `file` for
+`path`, `old_str` for `oldText`, `contents` for `content`, or the shorthand
+`{ oldText, newText }` instead of `{ edits: [...] }` are all reasonable guesses —
+and pi rejects each of them before any extension sees the call.
 
-No re-prompt, no retry, no `Error: invalid arguments`. If the model can call the
-tool at all, the guard makes the call go through.
+```jsonc
+// the model sends
+{ "file": "src/app.ts", "old_str": "foo", "new_str": "bar" }
+// the guard validates and runs
+{ "path": "src/app.ts", "edits": [{ "oldText": "foo", "newText": "bar" }] }
+```
 
-## Why this exists
+Underneath that one example are real alias maps for `edit`, `write`, and `read`,
+plus three shape repairs: a top-level `oldText`/`newText` (or aliases) is wrapped
+into `edits`, a JSON-string `edits` is parsed, and a string `offset`/`limit` on
+`read` is coerced to a number. No re-prompt, no retry, no
+`Error: invalid arguments`. If the model can call the tool at all, the guard
+makes the call go through.
 
-Every long agent session hits the same two failure modes:
-
-- **Alias roulette.** The model knows *what* to edit but not the exact field
-  name. `{"file": "src/app.ts", "old_str": "…", "new_str": "…"}` is a perfectly
-  reasonable guess — and pi rejects it before any extension sees the call.
-- **Log flooding.** A build or test command prints 1,500 lines. The model asks
-  for the tail, the shell runs the pipeline, and the tool result still carries
-  the whole truncated log into the next request. Context is spent on lines no
-  one will read, and the model re-runs the command to "see" the right part.
-
-pi-tool-guard fixes both at the tool boundary, in one pass, with no forking of
-pi's tools and no session scanning.
+Both values point the same way: the model should spend its turns on the task,
+not on re-running expensive commands or re-phrasing a rejected tool call.
 
 ## Install
 
