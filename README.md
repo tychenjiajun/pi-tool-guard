@@ -35,8 +35,10 @@ over a monorepo — and the most wasteful thing it does is immediately re-run th
 command just to see a different slice of the output.
 
 Pi's built-in bash tool only keeps a full-output file when the result exceeds
-50 KB / 2,000 lines. **pi-tool-guard keeps it for every slow command**, so a
-finished run becomes a durable artifact instead of a cost paid twice:
+50 KB / 2,000 lines — and a `grep`/`head` view can still hide the lines it did
+not select. **pi-tool-guard keeps a full log for every slow command it
+projects**, so a finished run becomes a durable artifact instead of a cost paid
+twice:
 
 | Step | What the guard does |
 |---|---|
@@ -159,9 +161,9 @@ guarded bash calls):
 The most common stripped pipelines were `head -40`, `head -20`, `head -30`,
 `tail -20`, and `grep -v node_modules`; the largest single projection took a
 **1,462-line** log down to the **20 lines** the model asked for. The guard never
-deletes a byte: every slow command keeps a full batch log regardless of Pi's
-truncation limit, so the agent can re-read any section of a finished run instead
-of paying for it again.
+deletes a byte: every projected slow command keeps a full batch log regardless
+of Pi's truncation limit, so the agent can re-read any section of a finished run
+instead of paying for it again.
 
 ## Argument alias normalization
 
@@ -379,10 +381,12 @@ never leaves the process. For slow commands it is written to
 the model can `read` it on demand instead of re-running an expensive command.
 
 **How is this different from pi's built-in `fullOutputPath`?** Pi only writes
-that file when a result is large enough to truncate. A slow command whose view
-hid interesting lines — but whose full output was still under 50 KB — would
-otherwise leave no complete log at all. The guard writes one for **every** slow
-command, so the un-projected output is always there to read.
+that file when a result is large enough to truncate. A projected slow command —
+say `npm run build | grep error`, whose full output is still under 50 KB —
+otherwise leaves no complete log at all. The guard writes one for every slow
+command it projects, so the un-projected output is always there to read. (A slow
+command with no view is passed straight through; the model already sees its full
+output, and Pi's truncation file covers the oversized case.)
 
 **Does it work with other extensions?** Yes — it publishes
 `details.piToolGuard` so downstream consumers such as SoL-Pi's

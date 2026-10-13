@@ -104,6 +104,6 @@
 
     <rect x="858" y="497" width="282" height="76" rx="14" fill="url(#chip)" stroke="#ffffff" stroke-opacity="0.08"/>
     <text x="884" y="528" font-size="24" font-weight="800" fill="#f6f4ff">1×</text>
-    <text x="884" y="550" font-size="13.5" fill="#8f89a8">slow command run once — log kept on disk</text>
+    <text x="884" y="550" font-size="13.5" fill="#8f89a8">slow projected command runs once — log kept</text>
   </g>
 </svg>
