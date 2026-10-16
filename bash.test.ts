@@ -937,6 +937,23 @@ describe("readPiToolGuardDetails", () => {
     });
   });
 
+  it("parses the capped flag and drops a non-boolean one", () => {
+    const base = {
+      version: 1,
+      originalCommand: "a",
+      cleanedCommand: "a",
+      removed: [],
+      removedPipeline: "",
+      outcome: "projection-applied",
+    };
+    expect(
+      readPiToolGuardDetails({ piToolGuard: { ...base, capped: true } })?.capped,
+    ).toBe(true);
+    expect(
+      readPiToolGuardDetails({ piToolGuard: { ...base, capped: "yes" } })?.capped,
+    ).toBeUndefined();
+  });
+
   it("drops malformed timing/projection instead of failing the whole record", () => {
     const parsed = readPiToolGuardDetails({
       piToolGuard: {

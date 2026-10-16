@@ -111,6 +111,17 @@ export interface PiToolGuardDetails {
    * commands stay visually identical to the built-in bash tool.
    */
   readonly slow?: boolean;
+  /**
+   * True when the visible text was capped to pi's model-facing bash limits
+   * (2000 lines / 50KB, tail kept). The projection re-runs against the full
+   * persisted output, so a line-based view over ultra-long lines (`head -60`
+   * over 30 matches of a minified HTML file) could otherwise return megabytes
+   * and bypass pi's truncation; the guard re-applies the same cap pi's native
+   * executor applies. On a fast run the `[Showing … Full output: <path>]`
+   * banner keeps the readback pointer in the text. Additive; consumers that
+   * predate it simply ignore it.
+   */
+  readonly capped?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -168,6 +179,7 @@ export function readPiToolGuardDetails(details: unknown): PiToolGuardDetails | u
     projection,
     noop,
     slow,
+    capped,
   } = record;
 
   if (version !== PI_TOOL_GUARD_CONTRACT_VERSION) return undefined;
@@ -190,5 +202,6 @@ export function readPiToolGuardDetails(details: unknown): PiToolGuardDetails | u
     ...(parsedProjection ? { projection: parsedProjection } : {}),
     ...(typeof noop === "boolean" ? { noop } : {}),
     ...(typeof slow === "boolean" ? { slow } : {}),
+    ...(typeof capped === "boolean" ? { capped } : {}),
   };
 }

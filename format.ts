@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_BYTES, formatSize, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { PiToolGuardProjection } from "./contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -58,4 +59,52 @@ export function formatProjectionSavings(projection: PiToolGuardProjection): stri
 
 function compact(value: number): string {
   return value.toFixed(1).replace(/\.0$/u, "");
+}
+
+export interface CappedText {
+  /** The capped text WITHOUT the truncation banner. */
+  text: string;
+  /**
+   * Pi's own `[Showing … Full output: <path>]` banner, empty when the text
+   * was not capped or when no `fullOutputPath` was supplied.
+   */
+  banner: string;
+  /** Whether the cap actually trimmed the text. */
+  capped: boolean;
+}
+
+/**
+ * Cap a guard-composed text to pi's model-facing bash limits (2000 lines /
+ * 50KB, tail kept), re-using pi's own `truncateTail` so the result matches
+ * what pi's native executor would have shown for the same output.
+ *
+ * The projection re-runs against the *full* persisted output, and `head` /
+ * `tail` are line-based: `head -60` over 30 matches of a minified HTML file
+ * returned all 4.3MB unchanged in production sessions — every line kept, and
+ * pi's own 50KB cap bypassed entirely. Re-applying the cap makes a projected
+ * result never larger than the native `cmd | extractor` pipeline's result.
+ *
+ * When capped, a `[Showing … Full output: <path>]` banner (pi's own wording)
+ * keeps the readback pointer reachable for `extractFullOutputPath`. Pass
+ * `fullOutputPath: undefined` when a notice or `[Command exited …]` bracket
+ * that follows the text already carries the path.
+ */
+export function capModelOutput(text: string, fullOutputPath?: string): CappedText {
+  const truncation = truncateTail(text);
+  if (!truncation.truncated) return { text, banner: "", capped: false };
+  if (!fullOutputPath) return { text: truncation.content, banner: "", capped: true };
+
+  const startLine = truncation.totalLines - truncation.outputLines + 1;
+  const endLine = truncation.totalLines;
+  let banner: string;
+  if (truncation.lastLinePartial) {
+    const lines = text.split("\n");
+    const lineBytes = encoder.encode(lines[endLine - 1] ?? "").length;
+    banner = `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${formatSize(lineBytes)}). Full output: ${fullOutputPath}]`;
+  } else if (truncation.truncatedBy === "lines") {
+    banner = `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${fullOutputPath}]`;
+  } else {
+    banner = `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${fullOutputPath}]`;
+  }
+  return { text: truncation.content, banner, capped: true };
 }

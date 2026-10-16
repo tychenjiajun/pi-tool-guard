@@ -312,11 +312,19 @@ interface PiToolGuardDetails {
   };
   noop?: boolean;            // projection left the output unchanged (inline only)
   slow?: boolean;            // cleaned command ran >= 10s; only slow runs show guard UI
+  capped?: boolean;          // text was capped to pi's 2000-line / 50KB limit
 }
 ```
 
 - `outcome: "projection-applied"` — `content` is the user's projection, applied
-  as a fallback. The guard **always keeps** `details.fullOutputPath` /
+  as a fallback. Because the projection re-runs against the *full* persisted
+  output, it is re-capped to pi's model-facing limits (2000 lines / 50KB, tail
+  kept) exactly as pi's native executor would cap the same pipeline: `head -60`
+  over 30 matches of a minified HTML file can be megabytes, line-for-line
+  unchanged, and must not bypass pi's truncation. When capped the result
+  carries `capped: true` and a `[Showing … Full output: <path>]` banner (fast
+  runs; slow runs point via the readback notice). The guard **always keeps**
+  `details.fullOutputPath` /
   `truncation`, and mirrors the path as `piToolGuard.sourcePath`, so a
   downstream reducer can read the exact full log and override the projection
   with its own receipt.
@@ -354,7 +362,10 @@ Bash flow:
    hoisting any non-silent statements it must preserve.
 2. The cleaned command runs through the original built-in execute.
 3. Fast + truncated → run the extractor against pi's full-output file via
-   `pi.exec`. Fast + inline → pipe the result through the extractor.
+   `pi.exec`. Fast + inline → pipe the result through the extractor. Either
+   way the projection is re-capped to pi's 2000-line / 50KB model-facing
+   limit (`capModelOutput`), with the `[Showing … Full output: <path>]`
+   banner when the cap trimmed it.
 4. Slow → persist the full, unextracted output, project, and append the
    Full-Output Readback notice.
 5. Non-zero exit → pi resolves an `isError` result ending in

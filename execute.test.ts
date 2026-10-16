@@ -837,3 +837,117 @@ describe("executeBashGuarded resolved isError results", () => {
     expect(result.isError).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: line-based projections over the full log stay capped
+//
+// Production incident: `grep -n "…" module2_outline.html | head -60` matched
+// 30 lines of a minified HTML file (~150KB each). `head` is line-based, so the
+// projection returned all 4.3MB unchanged and bypassed pi's own 50KB
+// model-facing cap — the guard must re-apply it.
+// ---------------------------------------------------------------------------
+
+describe("executeBashGuarded projection cap", () => {
+  const giant = Array.from(
+    { length: 30 },
+    (_, i) => `match ${i} ${"x".repeat(20_000)}`,
+  ).join("\n"); // 30 long lines ≈ 600KB — what `head -60` returns over them
+
+  it("caps a huge file projection to pi's limit with a Full output banner", async () => {
+    const { mockPi, mockOriginalExecute, ctx } = makeContext();
+    mockOriginalExecute.mockResolvedValue({
+      content: [
+        {
+          type: "text",
+          text: "pi truncated view\n\n[Showing lines 1-30 of 30 (50.0KB limit). Full output: /tmp/pi-bash-fake.log]",
+        },
+      ],
+      details: {
+        truncation: { truncated: true },
+        fullOutputPath: "/tmp/pi-bash-fake.log",
+      },
+      structuredContent: {
+        output: "",
+        truncated: true,
+        full_output_path: "/tmp/pi-bash-fake.log",
+        exit_code: 0,
+        wall_time_seconds: 0,
+      },
+    });
+    (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      stdout: giant,
+      stderr: "",
+      killed: false,
+    });
+
+    const result = await executeBashGuarded(
+      ctx,
+      "c1",
+      { command: "grep -n m f.html | head -60" },
+      new AbortController().signal,
+      () => {},
+      {},
+    );
+
+    const block = result.content[0];
+    if (block?.type !== "text") throw new Error("expected a text content block");
+    // The 600KB projection no longer reaches the model…
+    expect(Buffer.byteLength(block.text)).toBeLessThanOrEqual(50 * 1024 + 400);
+    // …the tail is kept and the readback pointer survives.
+    expect(block.text).toContain("match 29");
+    expect(block.text).toContain("Full output: /tmp/pi-bash-fake.log");
+    // pi's own structured payload is capped too, without the banner.
+    const sc = result.structuredContent as { output?: string } | undefined;
+    expect(Buffer.byteLength(sc?.output ?? "")).toBeLessThanOrEqual(50 * 1024);
+    expect(sc?.output).not.toContain("Full output:");
+
+    const guard = readPiToolGuardDetails(result.details);
+    expect(guard?.outcome).toBe("projection-applied");
+    expect(guard?.capped).toBe(true);
+    // details.fullOutputPath stays untouched for downstream reducers.
+    expect((result.details as { fullOutputPath?: string }).fullOutputPath).toBe(
+      "/tmp/pi-bash-fake.log",
+    );
+  });
+
+  it("caps a slow giant projection via the readback notice, not a second banner", async () => {
+    vi.useFakeTimers();
+    try {
+      const { mockPi, mockOriginalExecute, ctx } = makeContext();
+      mockPersistFullOutput.mockReturnValueOnce("/tmp/pi-bash-guard-deadbeef.log");
+      mockOriginalExecute.mockImplementation(async () => {
+        vi.advanceTimersByTime(FAST_THRESHOLD_MS + 100);
+        return {
+          content: [{ type: "text", text: "small" }],
+          details: undefined,
+        };
+      });
+      (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
+        code: 0,
+        stdout: giant,
+        stderr: "",
+        killed: false,
+      });
+
+      const result = await executeBashGuarded(
+        ctx,
+        "c1",
+        { command: "slowcmd | head -60" },
+        new AbortController().signal,
+        () => {},
+        {},
+      );
+
+      const block = result.content[0];
+      if (block?.type !== "text") throw new Error("expected a text content block");
+      expect(Buffer.byteLength(block.text)).toBeLessThanOrEqual(50 * 1024 + 1_500);
+      // The readback notice carries the pointer; no pi-style banner is added.
+      expect(block.text).toContain("Full output: /tmp/pi-bash-guard-deadbeef.log");
+      expect(block.text).not.toContain("[Showing");
+      expect(readPiToolGuardDetails(result.details)?.capped).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

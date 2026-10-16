@@ -152,6 +152,17 @@ describe("hoisting end to end", () => {
     ).rejects.toThrow(/Command exited with code 1/);
   });
 
+  it("caps hoisted sink text to pi's model-facing limit", async () => {
+    const command = "seq 1 70000; printf 'p\\n' | head -1";
+    const { text, guard } = await runBoth(command);
+
+    // seq's ~340KB goes to the sink and comes back around the projection.
+    // Pi would have capped that at 50KB for the model; the guard must too.
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024 + 400);
+    expect(text.trimEnd().endsWith("p")).toBe(true);
+    expect(guard?.capped).toBe(true);
+  });
+
   it("disposes its side-channel sinks", async () => {
     const command = "echo hi; printf 'a\\n' | tail -1";
     const { executed } = await runBoth(command);

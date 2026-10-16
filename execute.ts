@@ -22,7 +22,7 @@ import {
   parseBashError,
   splitExitStatus,
 } from "./bash.ts";
-import { formatProjectionSavings, measureText } from "./format.ts";
+import { capModelOutput, formatProjectionSavings, measureText } from "./format.ts";
 import { showGuardStatus } from "./tui.ts";
 import {
   PI_TOOL_GUARD_CONTRACT_VERSION,
@@ -123,7 +123,12 @@ function guardRecord(
   outcome: PiToolGuardOutcome,
   sourcePath: string | undefined,
   timing: PiToolGuardTiming,
-  extras: { projection?: PiToolGuardProjection; noop?: boolean; slow?: boolean } = {},
+  extras: {
+    projection?: PiToolGuardProjection;
+    noop?: boolean;
+    slow?: boolean;
+    capped?: boolean;
+  } = {},
 ): PiToolGuardDetails {
   return {
     version: PI_TOOL_GUARD_CONTRACT_VERSION,
@@ -159,6 +164,16 @@ function throwExtractorFailure(
   throw new Error(`${body}\n\n[${suffix}]`);
 }
 
+/**
+ * True when hoisting captured any side-channel text. `hoisted` is optional
+ * here (older callers) and so are its parts.
+ */
+function hasHoistedText(
+  hoisted: { prefix?: string; suffix?: string } | undefined,
+): boolean {
+  return (hoisted?.prefix?.length ?? 0) > 0 || (hoisted?.suffix?.length ?? 0) > 0;
+}
+
 // ---------------------------------------------------------------------------
 // F1: error rethrow with projection
 // ---------------------------------------------------------------------------
@@ -189,13 +204,23 @@ export async function rethrowGuardedError(
     ? await runExtractorOnFile(ctx.pi, parsed.fullOutputPath, stripped.removedPipeline)
     : await runExtractorOnText(ctx.pi, parsed.text, stripped.removedPipeline);
 
-  const body = joinOutputStreams(
+  const joined = joinOutputStreams(
     hoisted?.prefix,
     extracted !== undefined ? extracted.text : parsed.text,
     hoisted?.suffix,
     // Hoisted sinks end with the newline the shell wrote; drop it so the bracket
     // sits exactly two newlines below the body, as on the non-hoisted path.
   ).replace(/\n+$/, "");
+  // The extractor may have re-run against the full persisted output, and
+  // hoisted sinks are unbounded: cap either to pi's model-facing limit. The
+  // `[Command exited … Full output: <path>]` bracket below always survives,
+  // so no banner is appended here. `parsed.text` without either is pi's own
+  // already-capped text — leave it untouched (re-capping would trim pi's own
+  // truncation banner for nothing).
+  const body =
+    extracted !== undefined || hasHoistedText(hoisted)
+      ? capModelOutput(joined).text
+      : joined;
   if (extracted !== undefined) {
     // A slow failing command deserves the "do NOT re-run" wording; only the
     // caller knows how long the cleaned command ran, so `commandMs` is passed
@@ -466,7 +491,10 @@ async function runGuardedBash(
         ctx.ctx.ui.notify(uiNotice, "info");
       }
       throwExtractorFailure(
-        extracted.text || EMPTY_OUTPUT_PLACEHOLDER,
+        // Same cap as the projection: this body is the extractor's output over
+        // the full log and can be megabytes. The `[Command exited … Full
+        // output: <path>]` bracket carries the pointer, so no banner here.
+        capModelOutput(extracted.text || EMPTY_OUTPUT_PLACEHOLDER).text,
         extracted.code,
         sourcePath,
       );
@@ -521,10 +549,22 @@ async function runGuardedBash(
         );
       }
 
-      const body = assemble(projectedText);
+      // Pi caps every model-facing output at 2000 lines / 50KB. The
+      // projection runs against the *full* persisted output, so a line-based
+      // view (`head -60` over 30 matches of a minified HTML file) can return
+      // megabytes — re-apply pi's own cap so the projection can never hand the
+      // model more than the native `cmd | extractor` pipeline would have. On a
+      // fast run the `[Showing … Full output: <path>]` banner keeps the
+      // readback pointer reachable; a slow run gets the readback notice below
+      // instead, hence the `undefined` path there.
+      const capped = capModelOutput(
+        assemble(projectedText),
+        isSlow ? undefined : sourcePath,
+      );
+      const body = capped.text + capped.banner;
       const text = notices.length ? `${body}\n\n${notices.join("\n\n")}` : body;
       const structuredContent = restampStructuredContent(
-        body,
+        capped.text,
         // A status the guard split off is re-decided here: the view ran and
         // exited 0 (a non-zero view threw above), so that is the pipeline's
         // exit — without a split the original exit code already agrees.
@@ -544,7 +584,7 @@ async function runGuardedBash(
           "projection-applied",
           sourcePath,
           timing,
-          { projection, noop, slow: isSlow },
+          { projection, noop, slow: isSlow, capped: capped.capped },
         ),
       );
     }
@@ -566,7 +606,13 @@ async function runGuardedBash(
   // otherwise the shown text is the guarded output pi's own pipeline would
   // have printed.
   const shownText = statusSplit ? sourceText : rawText;
-  const fullBody = assemble(shownText);
+  // Hoisted sink text is guard-added and unbounded, so the assembled body is
+  // capped the same way the projection is. Without hoisting the content below
+  // is pi's own already-capped blocks (not `fullBody`), so no cap is needed.
+  const cappedFull = hasHoisted()
+    ? capModelOutput(assemble(shownText), isSlow ? undefined : sourcePath)
+    : undefined;
+  const fullBody = cappedFull ? cappedFull.text + cappedFull.banner : assemble(shownText);
   const structuredContent = restampStructuredContent(
     undefined,
     statusSplit ? extracted?.code : undefined,
@@ -590,7 +636,7 @@ async function runGuardedBash(
       "full-output",
       sourcePath,
       timing,
-      { slow: isSlow },
+      { slow: isSlow, capped: cappedFull?.capped },
     ),
   );
 }

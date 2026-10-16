@@ -37,7 +37,7 @@ A bash command that completes in under 10 seconds (configurable via `FAST_THRESH
 _Avoid_: quick command, short command
 
 **Fast-Path Projection**:
-For a **Fast Command** ending in a stripped view extractor, guard executes the *cleaned* command and re-applies the extractor to pi's formatted result instead of running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs. An empty inline projection renders as `(no output)`, matching pi's own empty-result rendering.
+For a **Fast Command** ending in a stripped view extractor, guard executes the *cleaned* command and re-applies the extractor to pi's formatted result instead of running the native `cmd | extractor` pipeline. This is faithful in the common case, with three accepted, documented deviations: pi merges stdout+stderr before the guard projects, so a stripped `grep`/`head` also filters stderr lines (a real shell pipeline would not); the guard trims trailing whitespace from the projection; and during the run pi's live `onUpdate` stream shows the cleaned command's unfiltered output — only the returned content is the projection. These are known limitations, not bugs. An empty inline projection renders as `(no output)`, matching pi's own empty-result rendering. When the extractor re-runs against a persisted full-output file the projection is subject to the **Projection Cap**, so it can never hand the model more than the native pipeline's result would have been.
 _Avoid_: exact-shell fidelity, stderr separation
 
 **Slow Command**:
@@ -65,7 +65,7 @@ The versioned `details.piToolGuard` record published on bash results when extrac
 _Avoid_: metadata blob, guard flag
 
 **Projection Applied**:
-A Guard Contract outcome meaning `content` is the result of re-running the stripped view extractor pipeline — the user's requested view, applied as a fallback. `details.fullOutputPath`/`truncation` are always kept so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection.
+A Guard Contract outcome meaning `content` is the result of re-running the stripped view extractor pipeline — the user's requested view, applied as a fallback. Because the extractor re-runs against the **full** persisted output and `head`/`tail` are line-based, the visible text is re-capped to pi's model-facing limits (2000 lines / 50KB, tail kept) with pi's own `truncateTail` — the **Projection Cap**; a trimmed result carries `capped: true` on the contract and a `[Showing … Full output: <path>]` banner on fast runs (slow runs point via the **Full-Output Readback**). `details.fullOutputPath`/`truncation` are always kept so a downstream reducer (e.g. SoL-Pi's evidence-preserving reducer) can read the exact full log and override the projection.
 _Avoid_: filtered result, reduced
 
 **Full Output**:
