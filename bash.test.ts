@@ -112,9 +112,27 @@ describe("fast command behavior", () => {
     } as unknown as ExtensionAPI;
   });
 
-  it("runExtractorOnText pipes text through extractor pipeline", async () => {
+  it("runExtractorOnText applies a plain head in-process (no pi.exec)", async () => {
+    const result = await runExtractorOnText(mockPi, "line1\nline2\nline3\n", "head -2");
+    expect(result).toEqual({ text: "line1\nline2", code: 0 });
+    expect(mockPi.exec).not.toHaveBeenCalled();
+  });
+
+  it("runExtractorOnFile applies a plain tail in-process (no pi.exec)", async () => {
+    const filePath = join(tmpdir(), `pi-tool-guard-view-${Date.now().toString(16)}.txt`);
+    writeFileSync(filePath, "line1\nline2\nline3\n", "utf-8");
+    try {
+      const result = await runExtractorOnFile(mockPi, filePath, "tail -1");
+      expect(result).toEqual({ text: "line3", code: 0 });
+      expect(mockPi.exec).not.toHaveBeenCalled();
+    } finally {
+      rmSync(filePath, { force: true });
+    }
+  });
+
+  it("runExtractorOnText pipes a non-simple pipeline through pi.exec", async () => {
     const text = "line1\nline2\nline3";
-    const pipeline = "head -2";
+    const pipeline = "grep line";
 
     (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
       code: 0,
@@ -132,9 +150,9 @@ describe("fast command behavior", () => {
     ]);
   });
 
-  it("runExtractorOnFile pipes file content through extractor pipeline", async () => {
+  it("runExtractorOnFile pipes a non-simple pipeline through pi.exec", async () => {
     const filePath = "/tmp/output.txt";
-    const pipeline = "tail -1";
+    const pipeline = "grep line";
 
     (mockPi.exec as ReturnType<typeof vi.fn>).mockResolvedValue({
       code: 0,
@@ -157,7 +175,7 @@ describe("fast command behavior", () => {
       stdout: "",
     });
 
-    const result = await runExtractorOnText(mockPi, "text", "head -1");
+    const result = await runExtractorOnText(mockPi, "text", "sed -n 1p");
     expect(result).toEqual({ text: "", code: 2 });
   });
 
@@ -187,14 +205,14 @@ describe("fast command behavior", () => {
       stdout: "",
     });
 
-    const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "head -1");
+    const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "sed -n 1p");
     expect(result).toEqual({ text: "", code: 2 });
   });
 
   it("runExtractorOnFile returns undefined only when pi.exec throws", async () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("fail"));
 
-    const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "head -1");
+    const result = await runExtractorOnFile(mockPi, "/tmp/file.txt", "grep nope");
     expect(result).toBeUndefined();
   });
 });
@@ -551,7 +569,7 @@ describe("executeBashGuarded", () => {
     const result = await executeBashGuarded(
       ctx,
       "call-1",
-      { command: "npm test | tail -5" },
+      { command: "npm test | grep -v '^$'" },
       new AbortController().signal,
       () => {},
       {},
@@ -571,7 +589,7 @@ describe("executeBashGuarded", () => {
 
     const guard = readPiToolGuardDetails(result.details);
     expect(guard).toMatchObject({
-      originalCommand: "npm test | tail -5",
+      originalCommand: "npm test | grep -v '^$'",
       cleanedCommand: "npm test",
       outcome: "projection-applied",
       slow: true,
@@ -765,7 +783,7 @@ describe("executeBashGuarded", () => {
       const result = await executeBashGuarded(
         ctx,
         "call-1",
-        { command: "ls | head -2" },
+        { command: "ls | grep -v zzz" },
         new AbortController().signal,
         () => {},
         {},

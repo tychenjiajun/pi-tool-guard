@@ -52,7 +52,7 @@ function makeContext() {
 // ---------------------------------------------------------------------------
 
 describe("rethrowGuardedError", () => {
-  const stripped = { removedNames: ["tail"], removedPipeline: "tail -5" };
+  const stripped = { removedNames: ["grep"], removedPipeline: "grep -v '^$'" };
 
   it("rethrows unchanged when error has no exit code (abort/timeout)", async () => {
     const { mockPi, ctx } = makeContext();
@@ -265,7 +265,7 @@ describe("executeBashGuarded error path", () => {
 
     await expect(
       executeBashGuarded(
-        ctx, "c1", { command: "npm test | tail -5" },
+        ctx, "c1", { command: "npm test | grep FAIL" },
         new AbortController().signal, () => {}, {},
       ),
     ).rejects.toThrow(/projected error[\s\S]*Command exited with code 1/);
@@ -390,8 +390,9 @@ describe("executeBashGuarded background operator", () => {
     const guard = readPiToolGuardDetails(result.details);
     expect(guard?.outcome).toBe("projection-applied");
     expect(guard?.removedPipeline).toBe("head -n 5");
-    // Hoisted output is re-attached around the projection.
-    expect(result.content[0]).toEqual({ type: "text", text: "hoisted\nline1" });
+    // Hoisted output is re-attached around the in-process projection (the
+    // 3-line source is shorter than `head -n 5`, so it passes through).
+    expect(result.content[0]).toEqual({ type: "text", text: "hoisted\nline1\nline2\nline3" });
     expect(mockCtx.ui.notify).not.toHaveBeenCalled();
   });
 
@@ -413,7 +414,9 @@ describe("executeBashGuarded background operator", () => {
 
     const executed = (mockOriginalExecute.mock.calls[0]![1] as { command: string }).command;
     expect(executed).toMatch(/^npm test 2>&1; \{ echo "done"\n\} >> '[^']+' 2>&1$/);
-    expect(result.content[0]).toEqual({ type: "text", text: "b\nc\ndone\n" });
+    // `tail -5` over the 3-line source keeps everything, then the hoisted
+    // `echo "done"` is re-attached.
+    expect(result.content[0]).toEqual({ type: "text", text: "a\nb\nc\ndone\n" });
     expect(readPiToolGuardDetails(result.details)?.removedPipeline).toBe("tail -5");
   });
 
@@ -472,7 +475,7 @@ describe("executeBashGuarded extractor exit-code fidelity", () => {
 
     await expect(
       executeBashGuarded(
-        ctx, "c1", { command: "ls | head -2" },
+        ctx, "c1", { command: "ls | grep FAIL" },
         new AbortController().signal, () => {}, {},
       ),
     ).rejects.toThrow(/Command exited with code 2/);
@@ -491,7 +494,7 @@ describe("executeBashGuarded extractor exit-code fidelity", () => {
 
     await expect(
       executeBashGuarded(
-        ctx, "c1", { command: "ls | head -2" },
+        ctx, "c1", { command: "ls | grep FAIL" },
         new AbortController().signal, () => {}, {},
       ),
     ).rejects.toThrow(/partial output[\s\S]*Command exited with code 3/);
@@ -510,7 +513,7 @@ describe("executeBashGuarded extractor exit-code fidelity", () => {
 
     await expect(
       executeBashGuarded(
-        ctx, "c1", { command: "ls | head -2" },
+        ctx, "c1", { command: "ls | grep FAIL" },
         new AbortController().signal, () => {}, {},
       ),
     ).rejects.toThrow(/\(no output\)[\s\S]*Command exited with code 2/);
@@ -595,7 +598,7 @@ describe("executeBashGuarded empty-output fidelity", () => {
     });
 
     const result = await executeBashGuarded(
-      ctx, "c1", { command: "true | head -1" },
+      ctx, "c1", { command: "true | grep x" },
       new AbortController().signal, () => {}, {},
     );
 
@@ -803,7 +806,7 @@ describe("executeBashGuarded resolved isError results", () => {
     (mockPi.exec as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("exec failed"));
 
     const result = await executeBashGuarded(
-      ctx, "c1", { command: "npm test | tail -5" },
+      ctx, "c1", { command: "npm test | grep boom" },
       new AbortController().signal, () => {}, {},
     );
 

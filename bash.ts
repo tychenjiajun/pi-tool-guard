@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { extractFullOutputPath } from "./pipeline.ts";
+import { applySimpleView } from "./view.ts";
 
 // ---------------------------------------------------------------------------
 // bash extractor execution helpers
@@ -91,7 +92,20 @@ export interface ExtractorRunResult {
 }
 
 /**
+ * Apply a plain `head`/`tail` in-process when possible. Returns `undefined`
+ * when the pipeline needs a shell (anything but a single plain head/tail), or
+ * when the file cannot be read — the caller then falls back to `pi.exec`.
+ */
+function tryInlineView(text: string, pipeline: string): string | undefined {
+  const applied = applySimpleView(text, pipeline);
+  return applied === undefined ? undefined : applied.trimEnd();
+}
+
+/**
  * Run an extractor pipeline on a file (e.g. the full output temp file).
+ *
+ * A plain `head`/`tail` is applied in-process; any other pipeline — and every
+ * unreadable file — goes through `pi.exec`.
  *
  * Returns `{ text, code }` for ANY exit code from `pi.exec` — callers decide
  * what to do with non-zero codes. Returns `undefined` only when `pi.exec`
@@ -102,6 +116,12 @@ export async function runExtractorOnFile(
   filePath: string,
   pipeline: string,
 ): Promise<ExtractorRunResult | undefined> {
+  try {
+    const inline = tryInlineView(readFileSync(filePath, "utf-8"), pipeline);
+    if (inline !== undefined) return { text: inline, code: 0 };
+  } catch {
+    // Fall through to the spawned path (e.g. the file does not exist).
+  }
   try {
     // The path travels as an argv element ($1), never spliced into the script,
     // so spaces/quotes/`$` in it cannot be re-parsed by bash.
@@ -114,7 +134,8 @@ export async function runExtractorOnFile(
 }
 
 /**
- * Run an extractor pipeline on inline text via printf + pipe.
+ * Run an extractor pipeline on inline text via printf + pipe, or in-process
+ * for a plain `head`/`tail`.
  *
  * Returns `{ text, code }` for ANY exit code from `pi.exec` — callers decide
  * what to do with non-zero codes. Returns `undefined` only when `pi.exec`
@@ -125,6 +146,8 @@ export async function runExtractorOnText(
   text: string,
   pipeline: string,
 ): Promise<ExtractorRunResult | undefined> {
+  const inline = tryInlineView(text, pipeline);
+  if (inline !== undefined) return { text: inline, code: 0 };
   try {
     // `text` is passed as $1, not spliced into the script. Splicing
     // `JSON.stringify(text)` let bash collapse real newlines into the two

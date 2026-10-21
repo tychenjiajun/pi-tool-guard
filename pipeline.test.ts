@@ -191,12 +191,16 @@ describe("stripTrailingExtractors", () => {
       }
     });
 
-    it("grep -oE | sort -u | head -40", () => {
+    it("grep -oE | sort -u | head -40 strips only the view", () => {
       const r = stripTrailingExtractors("grep -oE '[a-zA-Z_$][a-zA-Z0-9_$]{4,}' /tmp/file.js | sort -u | head -40");
-      if (r) {
-        // sort -u is an extractor, head is too
-        expect(r.removedNames).toContain("head");
-      }
+      expect(r).toBeDefined();
+      // `sort -u` is a transform and stops the walk; `head` is the view that
+      // is removed, and the shell keeps applying `sort -u`.
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.removedPipeline).toBe("head -40");
+      expect(r!.cleaned).toBe(
+        "grep -oE '[a-zA-Z_$][a-zA-Z0-9_$]{4,}' /tmp/file.js | sort -u",
+      );
     });
 
     it("sed | cat -n", () => {
@@ -358,7 +362,7 @@ describe("stripTrailingExtractors", () => {
     });
   });
 
-  // ── F7: transform extractors are never stripped ──────────────────────
+  // ── F7: transforms are never removed (but a following view still is) ─
 
   describe("F7 transform guard", () => {
     it("leaves a pure transform pipeline untouched", () => {
@@ -366,10 +370,21 @@ describe("stripTrailingExtractors", () => {
       expect(stripTrailingExtractors("npm test | sort")).toBeUndefined();
     });
 
-    it("leaves a transform-before-view pipeline untouched", () => {
-      // `sort` (transform) precedes `head` (view) in the trailing pipeline;
-      // the transform wins and nothing is stripped.
-      expect(stripTrailingExtractors("npm test | sort | head -5")).toBeUndefined();
+    it("strips a view that follows a transform, leaving the transform in place", () => {
+      // `sort` (transform) precedes `head` (view); only `head` is removed so
+      // the shell still runs `sort -rh` before the guard re-applies the view.
+      const r = stripTrailingExtractors("du -sh * | sort -rh | head -15");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.removedPipeline).toBe("head -15");
+      expect(r!.cleaned).toBe("du -sh * | sort -rh");
+    });
+
+    it("stops the walk at the first transform in a longer chain", () => {
+      const r = stripTrailingExtractors("grep err out.log | awk '{print $1}' | sort -u | head -40");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe("grep err out.log | awk '{print $1}' | sort -u");
     });
 
     it("strips view-only pipelines", () => {
@@ -389,6 +404,46 @@ describe("stripTrailingExtractors", () => {
     it("leaves a trailing transform in a multi-statement command untouched", () => {
       // `sort` is a transform in the final statement's pipeline.
       expect(stripTrailingExtractors("echo hello | cat; npm run build | sort")).toBeUndefined();
+    });
+  });
+
+  // ── Unbounded producers: the removed view may be the only terminator ──
+
+  describe("unbounded producer guard", () => {
+    it("refuses to strip a view after `tail -f`", () => {
+      expect(stripTrailingExtractors('tail -f /tmp/build.log | grep -m 1 "BINGO"')).toBeUndefined();
+      expect(stripTrailingExtractors("tail -F app.log | head -50")).toBeUndefined();
+      expect(stripTrailingExtractors("tail --follow=name app.log | tail -50")).toBeUndefined();
+    });
+
+    it("refuses to strip `yes | head`", () => {
+      expect(stripTrailingExtractors("yes | head -5")).toBeUndefined();
+    });
+
+    it("refuses a removed `tail -f`, which would hang the guard's own re-run", () => {
+      expect(stripTrailingExtractors("cat app.log | tail -f")).toBeUndefined();
+    });
+
+    it("refuses `journalctl -f` and an un-counted `ping`", () => {
+      expect(stripTrailingExtractors("journalctl -f | head -20")).toBeUndefined();
+      expect(stripTrailingExtractors("ping example.com | head -5")).toBeUndefined();
+    });
+
+    it("still strips when the producer is bounded", () => {
+      const r = stripTrailingExtractors("timeout 5 tail -f /tmp/x.log | head -20");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
+      expect(r!.cleaned).toBe("timeout 5 tail -f /tmp/x.log");
+
+      const ping = stripTrailingExtractors("ping -c 3 example.com | head -5");
+      expect(ping).toBeDefined();
+      expect(ping!.removedNames).toEqual(["head"]);
+    });
+
+    it("does not confuse `grep -f patterns` with a follow", () => {
+      const r = stripTrailingExtractors("grep -f patterns.txt src/*.ts | head -10");
+      expect(r).toBeDefined();
+      expect(r!.removedNames).toEqual(["head"]);
     });
   });
 

@@ -231,6 +231,50 @@ interface ProjectionPlan {
  */
 const READ_STATUS_RE = /\$\{?\?|PIPESTATUS/;
 
+/**
+ * `tail -f`/`-F`/`--follow`, and any bundled short flag ending in `f`/`F`.
+ * `--follow=name` is covered by the prefix test; `--force` is not a follow.
+ */
+function isFollowFlag(value: string): boolean {
+  if (value === "--follow" || value.startsWith("--follow=")) return true;
+  return /^-[A-Za-z]*[fF]/.test(value);
+}
+
+/** A bounding flag on `ping` (`-c N`, `-w N`, `--count`, `--deadline`). */
+function isPingBound(value: string): boolean {
+  return (
+    /^-[cWw]/.test(value) ||
+    value.startsWith("--count") ||
+    value.startsWith("--deadline")
+  );
+}
+
+/**
+ * Commands that never terminate on their own. A trailing view is often the only
+ * thing stopping them, so removing it would leave a command that hangs until
+ * pi's timeout (or, for `yes`, floods the result):
+ *
+ * ```
+ * tail -f build.log | grep -m 1 DONE   # grep -m 1 is the terminator
+ * yes | head -5                        # head is the terminator
+ * ```
+ *
+ * This also covers a *removed* view that never terminates (`cat f | tail -f`):
+ * the guard re-runs the removed pipeline over the full output, so it would hang
+ * there too. The set is deliberately a small, provable whitelist. `timeout
+ * 5 tail -f x | head` stays strippable because `timeout` is bounded.
+ */
+function isUnboundedProducer(cmd: Node): boolean {
+  if (cmd.type !== "Command") return false;
+  const name = cmd.name?.text;
+  if (name === undefined) return false;
+  if (name === "yes" || name === "watch") return true;
+  const argv = cmd.suffix.map((word) => word.value ?? word.text);
+  if (name === "tail" || name === "journalctl") return argv.some(isFollowFlag);
+  if (name === "ping") return !argv.some(isPingBound);
+  return false;
+}
+
 function isHoistable(command: string, node: Node): boolean {
   // `background` only exists on a Statement; an AndOr member is backgrounded by
   // its enclosing statement, which is checked when the statement is visited.
@@ -272,7 +316,13 @@ function planTargetAt(
   const cmds = inner.commands;
   if (cmds.length < 2) return undefined;
 
-  // Walk backward, collect trailing extractors
+  // Walk backward collecting the consecutive run of *view* extractors at the
+  // end of the pipeline. A transform extractor stops the walk instead of
+  // poisoning it: `... | sort -rh | head -15` strips only `head -15` and lets
+  // the shell keep applying `sort -rh`, so re-running the removed view over the
+  // cleaned command's output is byte-for-byte what the original pipeline
+  // produced. F7 still holds in the strict sense — a transform is never
+  // removed from the executed command.
   const removedNames: string[] = [];
   let stripFrom = cmds.length;
 
@@ -280,7 +330,7 @@ function planTargetAt(
     const cmd = cmds[i]!;
     if (cmd.type !== "Command") break;
     const name = cmd.name?.text;
-    if (name && isExtractor(name)) {
+    if (name && VIEW_EXTRACTORS.has(name)) {
       removedNames.unshift(name);
       stripFrom = i;
     } else {
@@ -290,11 +340,10 @@ function planTargetAt(
 
   if (stripFrom === cmds.length) return undefined;
 
-  // F7: a transform extractor in the trailing pipeline means we must not
-  // strip anything — the shell needs to apply the transformation.
-  if (removedNames.some((name) => TRANSFORM_EXTRACTORS.has(name))) {
-    return undefined;
-  }
+  // Refuse when any pipeline member never ends on its own (see
+  // `isUnboundedProducer`): the removed view may be its only terminator, and a
+  // removed `tail -f` would hang the guard's own re-run too.
+  if (cmds.some(isUnboundedProducer)) return undefined;
 
   const prevCmd = cmds[stripFrom - 1]!;
   if (!prevCmd) return undefined;
@@ -365,9 +414,15 @@ function planTargetAt(
  * `stripTrailingExtractors` is called without them (or a statement cannot be
  * hoisted faithfully) the command is left completely untouched.
  *
- * F7: if any removed extractor is a "transform" (sed/awk/cut/sort/...), the
- * command is left completely untouched — stripping a transform would silently
- * drop the transformation the user asked for.
+ * F7: a "transform" extractor (sed/awk/cut/sort/...) is never *removed* —
+ * stripping it would silently drop the transformation the user asked for. It
+ * does not block stripping a *view* that follows it, though: the backward walk
+ * stops at the transform, so `... | sort -rh | head -15` removes only `head
+ * -15` and the shell keeps applying `sort -rh`.
+ *
+ * Commands whose pipeline contains an unbounded producer (`tail -f`, `yes`,
+ * `journalctl -f`, un-counted `ping`) are left untouched, because the removed
+ * view may be the only thing that terminates them.
  */
 export function stripTrailingExtractors(
   command: string,
