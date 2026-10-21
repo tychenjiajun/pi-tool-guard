@@ -64,6 +64,22 @@ _Avoid_: hint, message
 Converting incorrect or alias field names to the canonical names expected by the tool schema.
 _Avoid_: field mapping, alias resolution
 
+**Tool-Name Repair**:
+Renaming a model-issued `toolCall` whose name pi cannot resolve to the tool the model meant, before pi dispatches the batch. It runs at `message_end` because pi finalizes `Tool <name> not found` before `prepareArguments`, `tool_call`, and `tool_result` run — so **Argument Normalization** can never see a misspelled name. Pi folds the returned message onto the finalized assistant message in place, which is the object the agent loop filters tool calls from, so the rename changes what executes, not just what is displayed.
+_Avoid_: tool aliasing, tool invention, auto-correct
+
+**Declared Tool Set**:
+The tool names pi declares to the model (`pi.getActiveTools()`) — the same set `prepareToolCall` resolves a call against. **Tool-Name Repair** only ever targets names in this set; picking from `getAllTools()` would aim at a tool the model was not allowed to call.
+_Avoid_: available tools, registry
+
+**Edit-Distance Budget**:
+How far a misspelled name may be from its target: distance 1, or 2 when the name is at least 8 characters and its first and last characters are unchanged. Deliberately tight, because a wrong rewrite runs the wrong tool while an unrewritten typo only costs one round trip. A case-only difference and a curated alias in `TOOL_NAME_ALIASES` (e.g. `codememode` → `codemode`) cost nothing. The closest target must be unique, and it must be at least 4 characters long.
+_Avoid_: fuzzy matching, similarity threshold
+
+**MCP Family**:
+The part of a namespaced tool name before the last `__` (`mcp__jira__create_issue` → `mcp__jira`). A **Tool-Name Repair** never crosses a family, and never adds or drops one, so a typo can be repaired inside a server but never point at a different server's tool.
+_Avoid_: namespace prefix, server id
+
 **Guard Contract**:
 The versioned `details.piToolGuard` record published on bash results when extractors were stripped. Describes the original and cleaned commands and the outcome. Downstream extensions (e.g. SoL-Pi's evidence-preserving reducer) read it to decide whether the visible content is the user's projection or a full output. Not published when the guard throws (a thrown error cannot carry `details`) — a non-zero *view* exit; a non-zero *cleaned* command whose exit the view re-decides still publishes the record, like any resolved result.
 _Avoid_: metadata blob, guard flag
@@ -117,6 +133,7 @@ _Avoid_: empty filter, redundant projection
 - A **Timing Split** rides on the **Guard Contract**; it is rendered only for a **Slow Command** when `extractorMs > 0` (a projection actually ran)
 - A **Guard Receipt** bundles the **Timing Split** with **Projection Stats**; it replaces pi's `Took` line only for a **Slow Command** whose projection changed the output — **Fast Commands** keep pi's plain line
 - A **No-op Projection** is a **Projection Applied** that leaves the output unchanged (inline projections only), so guard suppresses both its **Notice** and its **Guard Receipt** while still publishing the contract
+- A **Tool-Name Repair** picks its target from the **Declared Tool Set** only, within the **Edit-Distance Budget**, never across an **MCP Family**; it fixes the *name* and leaves the arguments to **Argument Normalization**, which then runs as usual for the renamed call
 
 ## Example dialogue
 
@@ -134,6 +151,9 @@ _Avoid_: empty filter, redundant projection
 >
 > **Dev:** "And `cd app && echo \"=== build ===\" && npm test | tail -12; echo \"R=$?\"`?"
 > **Domain expert:** "The `echo` and the `&&` chain used to block stripping, because re-applying `tail` would filter their output too. Now the **Hoisted Statements** go into **Side Channels** and the guard re-attaches them, so a **Hoisted Statement** no longer blocks anything. The `echo \"R=$?\"` is different: it is a **Status-Reading Statement**, and stripping `tail` would make `$?` observe `npm test` instead of `tail` — so that whole command is still passed through untouched. Move the status read out of the command (or drop it) and the guard handles the rest."
+>
+> **Dev:** "The model called `codememode` with perfectly good arguments and got `Tool codememode not found`. Why didn't argument normalization save it?"
+> **Domain expert:** "Because pi resolves the tool by exact name first and finalizes the error without running `prepareArguments`, the `tool_call` event, or `tool_result`. Only `message_end` is still ahead of it, and pi folds the message a handler returns onto the finalized assistant message — the object the loop reads tool calls from. So the guard renames the call there: `codememode` is a curated alias for `codemode`, the arguments are untouched, and the user sees a **Notice** saying the call was repaired. If the name were only vaguely close, the **Edit-Distance Budget** would refuse and pi's honest error would stand."
 
 ## Flagged ambiguities
 

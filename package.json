@@ -2,7 +2,7 @@
   "name": "pi-tool-guard",
   "version": "0.6.2",
   "type": "module",
-  "description": "Pi extension: runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, and repairs LLM tool-call arguments — edit/write/read aliases plus trailing head/tail/grep pipeline extractors.",
+  "description": "Pi extension: runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, repairs LLM tool-call arguments (edit/write/read aliases plus trailing head/tail/grep pipeline extractors), and renames a misspelled tool call before pi dispatches it.",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts",
@@ -11,7 +11,9 @@
     "./pipeline": "./pipeline.ts",
     "./pipeline.ts": "./pipeline.ts",
     "./aliases": "./aliases.ts",
-    "./aliases.ts": "./aliases.ts"
+    "./aliases.ts": "./aliases.ts",
+    "./names": "./names.ts",
+    "./names.ts": "./names.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -28,6 +30,7 @@
     "tool-calling",
     "tool-call-repair",
     "argument-normalization",
+    "tool-name-repair",
     "bash",
     "shell",
     "pipeline",

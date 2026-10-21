@@ -12,7 +12,7 @@
 [![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
 [![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](../tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen.svg)](../package.json)
+[![Tests](https://img.shields.io/badge/tests-349%20passing-brightgreen.svg)](../package.json)
 [![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
@@ -32,7 +32,7 @@
 | # | 故障 | guard 做什么 |
 |---|---|---|
 | **1. 昂贵的命令** | 一次 `vitest` 要跑几分钟，同一行反复输出；你只想看其中几项测试的结果，为此重跑纯属浪费。 | 清洗后的命令**只跑一次**，留住完整日志，只返回所要的 `head`/`tail`/`grep` 视图，并告知去读日志而不是重跑。 |
-| **2. 写错的参数** | 模型知道要做什么，却猜错了字段名——`file`、`old_str`、`contents`、顶层的 `oldText`——调用在执行前就被拒绝。 | 在 **schema 校验之前**把参数改写成标准字段名——不报错、不重试。 |
+| **2. 写错的调用** | 模型知道要做什么，却猜错了字段名——`file`、`old_str`、`contents`、顶层的 `oldText`——或者把工具名本身拼错（`codememode` 写成 `codemode`），调用在执行前就被拒绝。 | 在 **schema 校验之前**把参数改写成标准字段名，并在**工具批次派发之前**把拼错的工具名改成模型本意的工具——不报错、不重试。 |
 
 ## 价值一 —— 慢命令只跑一次，之后读它的日志
 
@@ -83,6 +83,23 @@ pi 内置的 bash 工具只有在结果超过 50 KB / 2000 行时才会保留完
 提示、无需重试、不会出现 `Error: invalid arguments`。只要模型能发起调用，guard
 就让它通过。
 
+模型把**工具名**写错时也一样。pi 按精确名称解析调用，一旦不匹配就直接把
+`Tool <name> not found` 定稿——早于 `prepareArguments`、早于 `tool_call` 事件、
+也早于 `tool_result`，所以参数修复永远看不到它。唯一先跑的是 `message_end`，
+而 pi 会把处理器返回的消息折回到已定稿的 assistant 消息上——正是 agent loop 读取
+工具调用用的那个对象。guard 就在那里改名：
+
+```text
+# 模型写的是                         →  guard 派发的是
+{ "name": "codememode", ... }    { "name": "codemode", "arguments": { "code": ... } }
+```
+
+真实会话中观察到的情况：`{ code }` 参数完全有效，而整个结果是
+`Tool codememode not found`。改写预算刻意收得很紧——改错会跑错工具，而漏改一个
+拼写错误只是一次往返代价：仅大小写不同、命中预置别名（`codememode` →
+`codemode`）、或与**唯一一个**已声明工具相距 1 次编辑（名称不短于 8 字符时才允许
+2 次，且首尾不变），并且永不跨 MCP 家族。其余一律留给 pi 拒绝。
+
 两个价值指向同一件事：模型应该把回合花在任务上，而不是重跑昂贵命令、或反复改写
 一个被拒绝的工具调用。
 
@@ -112,6 +129,7 @@ pi -e npm:pi-tool-guard
 | 守卫 | 工具 | 触发条件 | 效果 |
 |---|---|---|---|
 | **参数别名规范化** | `edit`、`write`、`read` | 别名字段名、顶层 `oldText`/`newText`、JSON 字符串形式的 `edits`、字符串型 `offset`/`limit` | 通过 `prepareArguments` 原地重写参数，发生在 schema 校验之前 |
+| **工具名修复** | 任何已声明工具 | `toolCall` 的名称无法被 pi 解析——大小写不对、已知拼写错误如 `codememode`、或与唯一一个已声明工具相距 1～2 次编辑 | 在 `message_end` 上改写 assistant 消息里的调用名，发生在工具批次派发之前 |
 | **Bash 管道投影** | `bash` | 尾部的**视图提取器**（`head`、`tail`、`grep`、`rg`……） | 运行清洗后的命令，重新应用视图，并把完整输出留在磁盘上 |
 
 ## 之前 → 之后
@@ -191,6 +209,27 @@ Tests  12 failed | 4 passed (16)
 | `read` | `path` | `file`、`filePath`、`file_path`、`target`、`filename`、`file_name` |
 | `read` | `offset` | `start`、`startLine`、`start_line`、`from`、`line` |
 | `read` | `limit` | `lines`、`maxLines`、`max_lines`、`count`、`numLines`、`num_lines` |
+
+## 工具名修复
+
+`names.ts` 在 `message_end` 上改写 pi 无法解析的工具调用名，候选集来自
+`pi.getActiveTools()`——与 `prepareToolCall` 解析用的那份已声明工具集相同，所以
+修复只会指向模型本来就有权调用的工具。
+
+| 写错的名字 | 为什么能解决 |
+|---|---|
+| `Read`、`CODEMODE` | 忽略大小写匹配 |
+| `codememode` | `TOOL_NAME_ALIASES` 预置别名 |
+| `reed`、`raed`、`baash`、`writ` | 编辑距离 1 |
+| `abcdeXYh` → `abcdefgh` | 编辑距离 2，不短于 8 字符，且首尾不变 |
+| `mcp__jira__create_issues` | 同一 `mcp__jira` 家族 |
+
+有意拒绝的情况：短名称上的两次编辑（`abcx`）、最近候选不唯一（`abcx` 同时靠近
+`abcd` 与 `abce`）、目标短于 4 字符（`ls`）、跨 MCP 服务的名称
+（`mcp__jria__…`）、以及与所有已声明工具都相距过远的名字——这些一律保留 pi 诚实的
+`Tool <name> not found`。改写只做浅拷贝：调用 id、参数（它们仍会再走上面的参数别名）
+与其它内容块均逐字节不变，guard 还会以
+`repaired tool call "codememode" → "codemode"` 通知告知用户。
 
 ## Bash 管道投影
 
@@ -317,8 +356,9 @@ interface PiToolGuardDetails {
 ## 架构
 
 ```
-index.ts       扩展入口；注册 edit/write/read/bash 覆盖
+index.ts       扩展入口；注册 edit/write/read/bash 覆盖与 message_end 工具名修复
 aliases.ts     edit / write / read 的参数规范化
+names.ts       工具名修复（大小写、预置别名、有界编辑距离）
 pipeline.ts    基于 unbash 的 bash 解析与提取器剥离
 execute.ts     核心 bash 执行：剥离、运行、投影、持久化、通知
 contract.ts    版本化的 details.piToolGuard 互操作契约
@@ -360,6 +400,12 @@ Bash 流程：
   视图的 `exit_code` 与整个受守护运行的 `wall_time_seconds`。
 - **转换提取器永不剥离。** `sed`、`awk`、`jq`、`sort`…… 有意留在命令里。
 - **不扫描会话、不重放。** 每次调用都重新执行命令；guard 从不返回缓存结果。
+- **工具名修复是改名，不是重新提示。** 模型不会被告诉它拼错了；修正后的调用用它
+  原本写的参数运行。用户会看到 `repaired tool call` 通知，transcript 里显示的也是
+  真正运行的工具。只能靠模糊匹配抢救的名称一律留给 pi 报错，而不是去猜。
+- **只修复直接工具名。** codemode 脚本**内部**写错的 `tools.<identifier>` 不是 pi
+  的工具调用，超出本扩展范围（那是
+  [pi-codemode-guard](https://pi.dev/packages/pi-codemode-guard) 的领地）。
 
 ## 常见问题
 
@@ -401,7 +447,8 @@ pi 只在结果大到需要截断时才写
 ## 相关 pi 扩展
 
 - [pi-codemode-guard](https://github.com/tychenjiajun/pi-codemode-guard) —— 在脚本
-  进入沙箱前编译 LLM 编写的 codemode 脚本。
+  进入沙箱前编译 LLM 编写的 codemode 脚本。它修复**脚本**；本 guard 在调用派发前
+  修复**拼错的工具名**，两者各负责一次写错的 `codemode` 调用的一半。
 - [pi-codemode-snippets](https://github.com/tychenjiajun/pi-codemode-snippets) ——
   把一个带 `// @snippet:` 的 `.js` 文件变成具名、可组合的 pi 工具。
 - [pi-skill-guard](https://github.com/tychenjiajun/pi-skill-guard) —— 守护技能的

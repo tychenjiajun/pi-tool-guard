@@ -15,6 +15,7 @@ import {
 } from "./aliases.ts";
 import { executeBashGuarded } from "./execute.ts";
 import { readPiToolGuardDetails } from "./contract.ts";
+import { repairToolCallNames } from "./names.ts";
 import { applyGuardReceipt, shouldRenderGuardReceipt, type ChildContainer } from "./render.ts";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +23,31 @@ import { applyGuardReceipt, shouldRenderGuardReceipt, type ChildContainer } from
 // ---------------------------------------------------------------------------
 
 export default function toolGuardExtension(pi: ExtensionAPI) {
+  // ── Repair tool *names* before the batch is dispatched ────────────────
+  // A misspelled tool name never reaches `prepareArguments` or `tool_call`:
+  // pi resolves the name first and finalizes `Tool <name> not found` without
+  // running a hook. `message_end` is the last point before dispatch, and pi
+  // folds the returned message onto the very assistant message the loop reads
+  // tool calls from, so a rename here decides what executes.
+  pi.on("message_end", async (event, ctx) => {
+    const message: { role?: unknown } = event.message;
+    if (message.role !== "assistant") return;
+
+    const { message: repaired, repairs } = repairToolCallNames(
+      event.message,
+      pi.getActiveTools(),
+    );
+    if (repairs.length === 0) return;
+
+    for (const repair of repairs) {
+      ctx.ui.notify(
+        `pi-tool-guard: repaired tool call "${repair.from}" → "${repair.to}"`,
+        "warning",
+      );
+    }
+    return { message: repaired };
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     // ── Override edit ──────────────────────────────────────────────────
     pi.registerTool({
@@ -110,6 +136,9 @@ export default function toolGuardExtension(pi: ExtensionAPI) {
       },
     });
 
-    ctx.ui.notify("pi-tool-guard: overriding edit/write/read/bash with corrections", "info");
+    ctx.ui.notify(
+      "pi-tool-guard: overriding edit/write/read/bash with corrections, repairing tool names",
+      "info",
+    );
   });
 }

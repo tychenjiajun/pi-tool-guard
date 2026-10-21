@@ -12,7 +12,7 @@ English | [简体中文](./docs/README.zh-CN.md)
 [![pi extension](https://img.shields.io/badge/pi-extension-7c3aed.svg)](https://pi.dev/docs/latest/extensions)
 [![pi package](https://img.shields.io/badge/pi-package-7c3aed.svg)](https://pi.dev/docs/latest/packages)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](./tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen.svg)](./package.json)
+[![Tests](https://img.shields.io/badge/tests-349%20passing-brightgreen.svg)](./package.json)
 [![CI](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/tychenjiajun/pi-tool-guard/actions/workflows/ci.yml)
 [![npm downloads](https://img.shields.io/npm/dm/pi-tool-guard.svg)](https://www.npmjs.com/package/pi-tool-guard)
 [![pnpm](https://img.shields.io/badge/package%20manager-pnpm-f69220.svg)](https://pnpm.io)
@@ -33,7 +33,7 @@ independent values to every session, and both matter:
 | # | The failure | What the guard does |
 |---|---|---|
 | **1. Expensive commands** | A `vitest` run takes minutes and prints the same lines over and over; you only want a few tests' results, and re-running to see them is pure waste. | Runs the cleaned command **once**, keeps the full log, returns just the `head`/`tail`/`grep` view that was asked for, and says to read the log instead of re-running. |
-| **2. Broken arguments** | The model knows what to do but guesses the field names — `file`, `old_str`, `contents`, a top-level `oldText` — and the call is rejected before it runs. | Rewrites the arguments to the canonical names **before schema validation** — no error, no retry. |
+| **2. Broken calls** | The model knows what to do but guesses the field names — `file`, `old_str`, `contents`, a top-level `oldText` — or misspells the tool itself (`codememode` for `codemode`), and the call is rejected before it runs. | Rewrites the arguments to the canonical names **before schema validation**, and renames a misspelled tool call to the tool the model meant **before the batch is dispatched** — no error, no retry. |
 
 ## Value 1 — a slow command runs once, then you read its log
 
@@ -87,6 +87,27 @@ into `edits`, a JSON-string `edits` is parsed, and a string `offset`/`limit` on
 `Error: invalid arguments`. If the model can call the tool at all, the guard
 makes the call go through.
 
+The same holds when the model gets the **tool name** wrong. pi resolves a call
+by exact name and, on a miss, finalizes `Tool <name> not found` *before*
+`prepareArguments`, before the `tool_call` event, and before `tool_result` — so
+no argument repair ever sees it. Only `message_end` runs first, and pi folds the
+message a handler returns back onto the finalized assistant message, which is
+exactly the object the agent loop reads tool calls from. The guard renames the
+call there:
+
+```text
+# the model writes          →  the guard dispatches
+{ "name": "codememode", ... }   { "name": "codemode", "arguments": { "code": ... } }
+```
+
+Observed in a real session: valid `{ code }` arguments, and
+`Tool codememode not found` as the whole result. The rewrite budget is
+deliberately tight — a wrong rewrite runs the wrong tool, while an unrewritten
+typo only costs one round trip: a case-only difference, a curated alias
+(`codememode` → `codemode`), or an edit distance of 1 (2 only for names of at
+least 8 characters, ends unchanged) to **exactly one** declared tool, never
+across an MCP family boundary. Anything else is left for pi to reject.
+
 Both values point the same way: the model should spend its turns on the task,
 not on re-running expensive commands or re-phrasing a rejected tool call.
 
@@ -118,6 +139,7 @@ Two independent guards, both installed automatically at session start:
 | Guard | Tool(s) | Trigger | Effect |
 |---|---|---|---|
 | **Argument normalization** | `edit`, `write`, `read` | An alias field name, a top-level `oldText`/`newText`, a JSON-string `edits`, or a string `offset`/`limit` | Rewrites arguments in place via `prepareArguments`, before schema validation |
+| **Tool-name repair** | any declared tool | A `toolCall` whose name pi cannot resolve — wrong case, a known typo like `codememode`, or one or two edits away from exactly one declared tool | Renames the call in the assistant message at `message_end`, before the tool batch is dispatched |
 | **Bash pipeline projection** | `bash` | A trailing **view extractor** (`head`, `tail`, `grep`, `rg`, …) | Runs the cleaned command, re-applies the view, and keeps the full output on disk |
 
 ## Before → after
@@ -200,6 +222,30 @@ repaired beyond simple key renames:
 | `read` | `path` | `file`, `filePath`, `file_path`, `target`, `filename`, `file_name` |
 | `read` | `offset` | `start`, `startLine`, `start_line`, `from`, `line` |
 | `read` | `limit` | `lines`, `maxLines`, `max_lines`, `count`, `numLines`, `num_lines` |
+
+## Tool-name repair
+
+`names.ts` renames a `toolCall` whose name pi cannot resolve. It runs from a
+`message_end` handler and reads the declared tool set with `pi.getActiveTools()`
+— the same set `prepareToolCall` resolves against — so a repair can only target
+a tool the model was allowed to call in the first place.
+
+| Wrong name | Why it resolves |
+|---|---|
+| `Read`, `CODEMODE` | case-insensitive match |
+| `codememode` | `TOOL_NAME_ALIASES` entry |
+| `reed`, `raed`, `baash`, `writ` | edit distance 1 |
+| `abcdeXYh` for `abcdefgh` | edit distance 2, ≥ 8 characters, both ends unchanged |
+| `mcp__jira__create_issues` | same `mcp__jira` family |
+
+Refused on purpose: two edits on a short name (`axyd`), a closest match that is
+ambiguous (`abcx` against both `abcd` and `abce`), a target shorter than four
+characters (`ls`), a name that crosses MCP servers (`mcp__jria__…`), and any
+name too far from every declared tool — those keep pi's honest
+`Tool <name> not found`. The rename is shallow-copy only: the call id, the
+arguments (they still go through the argument aliases above), and every other
+content part stay byte-identical, and the guard says so with a `repaired tool
+call "codememode" → "codemode"` notification.
 
 ## Bash pipeline projection
 
@@ -361,7 +407,9 @@ inline content for unknown versions.
 
 ```
 index.ts       Extension entry; registers the edit/write/read/bash overrides
+               and the message_end tool-name repair
 aliases.ts     Argument normalization for edit / write / read
+names.ts       Tool-name repair (case, curated alias, bounded edit distance)
 pipeline.ts    Bash parsing (unbash) and extractor stripping
 execute.ts     Core bash execution: strip, run, project, persist, notice
 contract.ts    Versioned details.piToolGuard interop contract
@@ -418,6 +466,14 @@ Documented, intentional behaviors — not bugs:
   be its only terminator.
 - **No session scanning and no replay.** Every invocation executes the command
   again; the guard never returns a cached run.
+- **Tool-name repair is a rename, not a re-prompt.** The model is not told it
+  typo'd; the corrected call runs with the arguments it wrote. The user sees a
+  `repaired tool call` notification, and the transcript shows the tool that
+  actually ran. A name that only a fuzzy rewrite could rescue is left to fail
+  rather than guessed at — see the budget in [Tool-name repair](#tool-name-repair).
+- **Only direct tool names are repaired.** A wrong `tools.<identifier>` *inside*
+  a codemode script is not a pi tool call and is out of scope here (that is
+  [pi-codemode-guard](https://pi.dev/packages/pi-codemode-guard) territory).
 
 ## FAQ
 
@@ -470,7 +526,9 @@ constants today.
 ## Related pi extensions
 
 - [pi-codemode-guard](https://github.com/tychenjiajun/pi-codemode-guard) —
-  compiles LLM-written codemode scripts before they reach the sandbox.
+  compiles LLM-written codemode scripts before they reach the sandbox. It fixes
+  the *script*; this guard fixes a *misspelled tool name* before the call is
+  dispatched, so the two cover different halves of a broken `codemode` call.
 - [pi-codemode-snippets](https://github.com/tychenjiajun/pi-codemode-snippets) —
   turns a `// @snippet:` `.js` file into a named, composable pi tool.
 - [pi-skill-guard](https://github.com/tychenjiajun/pi-skill-guard) —
