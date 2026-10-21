@@ -96,9 +96,9 @@ pi 内置的 bash 工具只有在结果超过 50 KB / 2000 行时才会保留完
 
 真实会话中观察到的情况：`{ code }` 参数完全有效，而整个结果是
 `Tool codememode not found`。改写预算刻意收得很紧——改错会跑错工具，而漏改一个
-拼写错误只是一次往返代价：仅大小写不同、命中预置别名（`codememode` →
-`codemode`）、或与**唯一一个**已声明工具相距 1 次编辑（名称不短于 8 字符时才允许
-2 次，且首尾不变），并且永不跨 MCP 家族。其余一律留给 pi 拒绝。
+拼写错误只是一次往返代价：仅大小写不同、或与**唯一一个**已声明工具相距 1 次
+编辑（名称不短于 8 字符时才允许 2 次，且首尾不变），并且永不跨 MCP 家族。其余
+一律留给 pi 拒绝。
 
 两个价值指向同一件事：模型应该把回合花在任务上，而不是重跑昂贵命令、或反复改写
 一个被拒绝的工具调用。
@@ -129,7 +129,7 @@ pi -e npm:pi-tool-guard
 | 守卫 | 工具 | 触发条件 | 效果 |
 |---|---|---|---|
 | **参数别名规范化** | `edit`、`write`、`read` | 别名字段名、顶层 `oldText`/`newText`、JSON 字符串形式的 `edits`、字符串型 `offset`/`limit` | 通过 `prepareArguments` 原地重写参数，发生在 schema 校验之前 |
-| **工具名修复** | 任何已声明工具 | `toolCall` 的名称无法被 pi 解析——大小写不对、已知拼写错误如 `codememode`、或与唯一一个已声明工具相距 1～2 次编辑 | 在 `message_end` 上改写 assistant 消息里的调用名，发生在工具批次派发之前 |
+| **工具名修复** | 任何已声明工具 | `toolCall` 的名称无法被 pi 解析——大小写不对、或与唯一一个已声明工具相距 1～2 次编辑 | 在 `message_end` 上改写 assistant 消息里的调用名，发生在工具批次派发之前 |
 | **Bash 管道投影** | `bash` | 尾部的**视图提取器**（`head`、`tail`、`grep`、`rg`……） | 运行清洗后的命令，重新应用视图，并把完整输出留在磁盘上 |
 
 ## 之前 → 之后
@@ -219,7 +219,7 @@ Tests  12 failed | 4 passed (16)
 | 写错的名字 | 为什么能解决 |
 |---|---|
 | `Read`、`CODEMODE` | 忽略大小写匹配 |
-| `codememode` | `TOOL_NAME_ALIASES` 预置别名 |
+| `codememode` → `codemode` | 编辑距离 2——正是本功能要修的那个拼写 |
 | `reed`、`raed`、`baash`、`writ` | 编辑距离 1 |
 | `abcdeXYh` → `abcdefgh` | 编辑距离 2，不短于 8 字符，且首尾不变 |
 | `mcp__jira__create_issues` | 同一 `mcp__jira` 家族 |
@@ -358,7 +358,7 @@ interface PiToolGuardDetails {
 ```
 index.ts       扩展入口；注册 edit/write/read/bash 覆盖与 message_end 工具名修复
 aliases.ts     edit / write / read 的参数规范化
-names.ts       工具名修复（大小写、预置别名、有界编辑距离）
+names.ts       工具名修复（大小写、有界编辑距离）
 pipeline.ts    基于 unbash 的 bash 解析与提取器剥离
 execute.ts     核心 bash 执行：剥离、运行、投影、持久化、通知
 contract.ts    版本化的 details.piToolGuard 互操作契约

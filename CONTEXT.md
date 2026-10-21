@@ -73,7 +73,7 @@ The tool names pi declares to the model (`pi.getActiveTools()`) — the same set
 _Avoid_: available tools, registry
 
 **Edit-Distance Budget**:
-How far a misspelled name may be from its target: distance 1, or 2 when the name is at least 8 characters and its first and last characters are unchanged. Deliberately tight, because a wrong rewrite runs the wrong tool while an unrewritten typo only costs one round trip. A case-only difference and a curated alias in `TOOL_NAME_ALIASES` (e.g. `codememode` → `codemode`) cost nothing. The closest target must be unique, and it must be at least 4 characters long.
+How far a misspelled name may be from its target: distance 1, or 2 when the name is at least 8 characters and its first and last characters are unchanged. Deliberately tight, because a wrong rewrite runs the wrong tool while an unrewritten typo only costs one round trip. A case-only difference costs nothing. The closest target must be unique, and it must be at least 4 characters long.
 _Avoid_: fuzzy matching, similarity threshold
 
 **MCP Family**:
@@ -153,7 +153,7 @@ _Avoid_: empty filter, redundant projection
 > **Domain expert:** "The `echo` and the `&&` chain used to block stripping, because re-applying `tail` would filter their output too. Now the **Hoisted Statements** go into **Side Channels** and the guard re-attaches them, so a **Hoisted Statement** no longer blocks anything. The `echo \"R=$?\"` is different: it is a **Status-Reading Statement**, and stripping `tail` would make `$?` observe `npm test` instead of `tail` — so that whole command is still passed through untouched. Move the status read out of the command (or drop it) and the guard handles the rest."
 >
 > **Dev:** "The model called `codememode` with perfectly good arguments and got `Tool codememode not found`. Why didn't argument normalization save it?"
-> **Domain expert:** "Because pi resolves the tool by exact name first and finalizes the error without running `prepareArguments`, the `tool_call` event, or `tool_result`. Only `message_end` is still ahead of it, and pi folds the message a handler returns onto the finalized assistant message — the object the loop reads tool calls from. So the guard renames the call there: `codememode` is a curated alias for `codemode`, the arguments are untouched, and the user sees a **Notice** saying the call was repaired. If the name were only vaguely close, the **Edit-Distance Budget** would refuse and pi's honest error would stand."
+> **Domain expert:** "Because pi resolves the tool by exact name first and finalizes the error without running `prepareArguments`, the `tool_call` event, or `tool_result`. Only `message_end` is still ahead of it, and pi folds the message a handler returns onto the finalized assistant message — the object the loop reads tool calls from. So the guard renames the call there: `codememode` is two edits from `codemode` — same first and last character, long enough for the wider **Edit-Distance Budget** — the arguments are untouched, and the user sees a **Notice** saying the call was repaired. If the name were only vaguely close, the **Edit-Distance Budget** would refuse and pi's honest error would stand."
 
 ## Flagged ambiguities
 

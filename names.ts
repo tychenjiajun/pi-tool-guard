@@ -20,7 +20,6 @@
 // wrong tool while an unrewritten typo only costs one round trip:
 //
 //   * an exact name and a case-only variant are free,
-//   * a curated alias (`TOOL_NAME_ALIASES`) is free,
 //   * otherwise the edit distance must be 1, or 2 for names of at least 8
 //     characters, with the first and last character unchanged,
 //   * the closest declared name must be unique, and
@@ -29,8 +28,6 @@
 export type ToolNameRepairKind =
   /** The name only differed in case (`Read` → `read`). */
   | "case"
-  /** The name is a curated `TOOL_NAME_ALIASES` entry (`codememode` → `codemode`). */
-  | "alias"
   /** The name was within the edit-distance budget of exactly one declared tool. */
   | "distance";
 
@@ -38,20 +35,9 @@ export interface ToolNameRepair {
   readonly from: string;
   readonly to: string;
   readonly kind: ToolNameRepairKind;
-  /** Edit distance from `from` to `to`. `0` for `case` and `alias` repairs. */
+  /** Edit distance from `from` to `to`. `0` for a `case` repair. */
   readonly distance: number;
 }
-
-/**
- * Curated name typos, keyed by what the model writes. A key only applies when
- * its target is a declared tool; the alias is preferred over the edit-distance
- * search so a known typo always resolves to the same tool.
- */
-export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
-  // Observed in a real pi session: the model wrote `codememode` with perfectly
-  // valid `{ code }` arguments and got `Tool codememode not found`.
-  codememode: "codemode",
-};
 
 /** Declared names shorter than this are never rewrite targets. */
 const MIN_TARGET_LENGTH = 4;
@@ -196,18 +182,12 @@ function nearestDeclaredName(
 export function repairToolName(
   name: string,
   declared: readonly string[],
-  aliases: Readonly<Record<string, string | undefined>> = TOOL_NAME_ALIASES,
 ): ToolNameRepair | undefined {
   if (declared.includes(name)) return undefined;
 
   const lowercased = name.toLowerCase();
   const caseMatch = declared.find((candidate) => candidate.toLowerCase() === lowercased);
   if (caseMatch !== undefined) return { from: name, to: caseMatch, kind: "case", distance: 0 };
-
-  const alias = aliases[name] ?? aliases[lowercased];
-  if (alias !== undefined && declared.includes(alias)) {
-    return { from: name, to: alias, kind: "alias", distance: 0 };
-  }
 
   return nearestDeclaredName(name, declared);
 }
@@ -221,7 +201,6 @@ export function repairToolName(
 export function repairToolCallNames<T extends ToolCallMessageLike>(
   message: T,
   declared: readonly string[],
-  aliases: Readonly<Record<string, string | undefined>> = TOOL_NAME_ALIASES,
 ): ToolCallNameRepair<T> {
   if (message.role !== "assistant" || !Array.isArray(message.content)) {
     return { message, repairs: [] };
@@ -235,7 +214,7 @@ export function repairToolCallNames<T extends ToolCallMessageLike>(
     const part: unknown = content[index];
     if (!isToolCallPart(part)) continue;
 
-    const repair = repairToolName(part.name, declared, aliases);
+    const repair = repairToolName(part.name, declared);
     if (repair === undefined) continue;
 
     repairedContent ??= [...content];

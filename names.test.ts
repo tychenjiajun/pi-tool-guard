@@ -1,18 +1,11 @@
 import { describe, it, expect } from "vitest";
-import {
-  TOOL_NAME_ALIASES,
-  editDistance,
-  repairToolCallNames,
-  repairToolName,
-} from "./names.ts";
+import { editDistance, repairToolCallNames, repairToolName } from "./names.ts";
 
 // ---------------------------------------------------------------------------
 // fixtures
 // ---------------------------------------------------------------------------
 
 const CODING_TOOLS = ["bash", "edit", "read", "write", "codemode", "tool_search"];
-
-const NO_ALIASES: Readonly<Record<string, string>> = {};
 
 const assistantMessage = (...content: unknown[]): Record<string, unknown> => ({
   role: "assistant",
@@ -105,40 +98,25 @@ describe("repairToolName", () => {
     });
   });
 
-  describe("curated aliases", () => {
-    it("ships the observed codememode typo", () => {
-      expect(TOOL_NAME_ALIASES.codememode).toBe("codemode");
-    });
-
-    it("repairs codememode → codemode with valid arguments untouched", () => {
+  describe("the observed typo", () => {
+    it("repairs codememode → codemode as a distance-2 repair", () => {
       expect(repairToolName("codememode", CODING_TOOLS)).toEqual({
         from: "codememode",
         to: "codemode",
-        kind: "alias",
-        distance: 0,
+        kind: "distance",
+        distance: 2,
       });
     });
 
-    it("reads the alias table case-insensitively", () => {
-      expect(repairToolName("CodeMemode", CODING_TOOLS)).toEqual({
-        from: "CodeMemode",
+    it("repairs a case-mangled variant of it too", () => {
+      expect(repairToolName("CodeMemode", CODING_TOOLS)).toMatchObject({
         to: "codemode",
-        kind: "alias",
-        distance: 0,
+        kind: "distance",
       });
     });
 
-    it("ignores an alias whose target is not declared", () => {
+    it("still refuses it when the target is not declared", () => {
       expect(repairToolName("codememode", ["read"])).toBeUndefined();
-    });
-
-    it("lets a caller pass its own alias table", () => {
-      expect(repairToolName("shel", ["bash"], { shel: "bash" })).toEqual({
-        from: "shel",
-        to: "bash",
-        kind: "alias",
-        distance: 0,
-      });
     });
   });
 
@@ -164,8 +142,8 @@ describe("repairToolName", () => {
       expect(repairToolName("writ", CODING_TOOLS)).toMatchObject({ to: "write", distance: 1 });
     });
 
-    it("repairs the repeated-syllable typo even without an alias", () => {
-      expect(repairToolName("codememode", ["codemode"], NO_ALIASES)).toEqual({
+    it("repairs the repeated-syllable typo", () => {
+      expect(repairToolName("codememode", ["codemode"])).toEqual({
         from: "codememode",
         to: "codemode",
         kind: "distance",
@@ -174,18 +152,18 @@ describe("repairToolName", () => {
     });
 
     it("refuses two edits on a short name", () => {
-      expect(repairToolName("axyd", ["abcd"], NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("axyd", ["abcd"])).toBeUndefined();
     });
 
     it("allows two edits on a long name when both ends are unchanged", () => {
-      expect(repairToolName("abcdeXYh", ["abcdefgh"], NO_ALIASES)).toMatchObject({
+      expect(repairToolName("abcdeXYh", ["abcdefgh"])).toMatchObject({
         to: "abcdefgh",
         distance: 2,
       });
     });
 
     it("refuses two edits that move either end", () => {
-      expect(repairToolName("odemodec", ["codemode"], NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("odemodec", ["codemode"])).toBeUndefined();
     });
 
     it("refuses a name that is too far from every declared tool", () => {
@@ -193,11 +171,11 @@ describe("repairToolName", () => {
     });
 
     it("refuses when the closest name is ambiguous", () => {
-      expect(repairToolName("abcx", ["abcd", "abce"], NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("abcx", ["abcd", "abce"])).toBeUndefined();
     });
 
     it("never targets a name shorter than four characters", () => {
-      expect(repairToolName("lss", ["ls"], NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("lss", ["ls"])).toBeUndefined();
     });
   });
 
@@ -205,26 +183,26 @@ describe("repairToolName", () => {
     const declared = ["mcp__jira__create_issue", "read"];
 
     it("repairs a typo inside the same family", () => {
-      expect(repairToolName("mcp__jira__create_issues", declared, NO_ALIASES)).toMatchObject({
+      expect(repairToolName("mcp__jira__create_issues", declared)).toMatchObject({
         to: "mcp__jira__create_issue",
         distance: 1,
       });
     });
 
     it("repairs a typo in the tool segment of a long name", () => {
-      expect(repairToolName("mcp__jira__create_isue", declared, NO_ALIASES)).toMatchObject({
+      expect(repairToolName("mcp__jira__create_isue", declared)).toMatchObject({
         to: "mcp__jira__create_issue",
         distance: 1,
       });
     });
 
     it("refuses to cross into a different server", () => {
-      expect(repairToolName("mcp__jria__create_issue", declared, NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("mcp__jria__create_issue", declared)).toBeUndefined();
     });
 
     it("refuses to add or drop a namespace", () => {
-      expect(repairToolName("jira__create_issue", declared, NO_ALIASES)).toBeUndefined();
-      expect(repairToolName("create_issue", declared, NO_ALIASES)).toBeUndefined();
+      expect(repairToolName("jira__create_issue", declared)).toBeUndefined();
+      expect(repairToolName("create_issue", declared)).toBeUndefined();
     });
   });
 });
@@ -241,7 +219,7 @@ describe("repairToolCallNames", () => {
     const { message: repaired, repairs } = repairToolCallNames(message, CODING_TOOLS);
 
     expect(repairs).toEqual([
-      { from: "codememode", to: "codemode", kind: "alias", distance: 0 },
+      { from: "codememode", to: "codemode", kind: "distance", distance: 2 },
     ]);
     const content = repaired.content as Array<Record<string, unknown>>;
     // Only `name` is rewritten: the call id, the arguments, and every other

@@ -24,7 +24,7 @@
 - `pipeline.ts` — Bash command parsing and extractor stripping
 - `view.ts` — In-process application of a plain trailing `head`/`tail`
 - `aliases.ts` — Argument normalization for edit/write/read
-- `names.ts` — Tool-name repair: case, curated `TOOL_NAME_ALIASES`, bounded edit distance over the declared tool set
+- `names.ts` — Tool-name repair: case-fold plus bounded edit distance over the declared tool set
 - `contract.ts` — Versioned `details.piToolGuard` interop contract for downstream consumers (e.g. SoL-Pi's evidence-preserving reducer)
 - `timing.ts` — Duration formatting + proportional bar split
 - `format.ts` — Pure text measurement and savings/count/byte formatting

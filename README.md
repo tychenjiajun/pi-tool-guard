@@ -103,10 +103,10 @@ call there:
 Observed in a real session: valid `{ code }` arguments, and
 `Tool codememode not found` as the whole result. The rewrite budget is
 deliberately tight — a wrong rewrite runs the wrong tool, while an unrewritten
-typo only costs one round trip: a case-only difference, a curated alias
-(`codememode` → `codemode`), or an edit distance of 1 (2 only for names of at
-least 8 characters, ends unchanged) to **exactly one** declared tool, never
-across an MCP family boundary. Anything else is left for pi to reject.
+typo only costs one round trip: a case-only difference, or an edit distance of
+1 (2 only for names of at least 8 characters, ends unchanged) to **exactly
+one** declared tool, never across an MCP family boundary. Anything else is
+left for pi to reject.
 
 Both values point the same way: the model should spend its turns on the task,
 not on re-running expensive commands or re-phrasing a rejected tool call.
@@ -139,7 +139,7 @@ Two independent guards, both installed automatically at session start:
 | Guard | Tool(s) | Trigger | Effect |
 |---|---|---|---|
 | **Argument normalization** | `edit`, `write`, `read` | An alias field name, a top-level `oldText`/`newText`, a JSON-string `edits`, or a string `offset`/`limit` | Rewrites arguments in place via `prepareArguments`, before schema validation |
-| **Tool-name repair** | any declared tool | A `toolCall` whose name pi cannot resolve — wrong case, a known typo like `codememode`, or one or two edits away from exactly one declared tool | Renames the call in the assistant message at `message_end`, before the tool batch is dispatched |
+| **Tool-name repair** | any declared tool | A `toolCall` whose name pi cannot resolve — wrong case, or one or two edits away from exactly one declared tool | Renames the call in the assistant message at `message_end`, before the tool batch is dispatched |
 | **Bash pipeline projection** | `bash` | A trailing **view extractor** (`head`, `tail`, `grep`, `rg`, …) | Runs the cleaned command, re-applies the view, and keeps the full output on disk |
 
 ## Before → after
@@ -233,7 +233,7 @@ a tool the model was allowed to call in the first place.
 | Wrong name | Why it resolves |
 |---|---|
 | `Read`, `CODEMODE` | case-insensitive match |
-| `codememode` | `TOOL_NAME_ALIASES` entry |
+| `codememode` for `codemode` | edit distance 2 — the typo this was built for |
 | `reed`, `raed`, `baash`, `writ` | edit distance 1 |
 | `abcdeXYh` for `abcdefgh` | edit distance 2, ≥ 8 characters, both ends unchanged |
 | `mcp__jira__create_issues` | same `mcp__jira` family |
@@ -409,7 +409,7 @@ inline content for unknown versions.
 index.ts       Extension entry; registers the edit/write/read/bash overrides
                and the message_end tool-name repair
 aliases.ts     Argument normalization for edit / write / read
-names.ts       Tool-name repair (case, curated alias, bounded edit distance)
+names.ts       Tool-name repair (case, bounded edit distance)
 pipeline.ts    Bash parsing (unbash) and extractor stripping
 execute.ts     Core bash execution: strip, run, project, persist, notice
 contract.ts    Versioned details.piToolGuard interop contract
