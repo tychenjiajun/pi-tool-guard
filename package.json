@@ -2,7 +2,7 @@
   "name": "pi-tool-guard",
   "version": "0.6.1",
   "type": "module",
-  "description": "Pi extension with two values: it runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, and it repairs LLM tool calls — argument aliases for edit/write/read plus trailing head/tail/grep pipeline extractors.",
+  "description": "Pi extension: runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, and repairs LLM tool-call arguments — edit/write/read aliases plus trailing head/tail/grep pipeline extractors.",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts",
@@ -24,36 +24,23 @@
     "pi",
     "llm",
     "ai-agent",
-    "ai-agents",
-    "ai-coding",
     "agentic-coding",
     "tool-calling",
     "tool-call-repair",
-    "tool-override",
     "argument-normalization",
-    "alias-correction",
     "bash",
     "shell",
     "pipeline",
-    "pipeline-optimization",
     "output-projection",
-    "output-truncation",
     "context-window",
-    "context-savings",
     "token-savings",
-    "head",
-    "tail",
-    "grep",
     "unbash",
     "sol-pi",
-    "typescript",
-    "developer-tools",
-    "cli",
-    "mcp"
+    "typescript"
   ],
   "author": "Jiajun Chen <tychenjiajun@live.cn>",
   "license": "MIT",
-  "homepage": "https://www.npmjs.com/package/pi-tool-guard",
+  "homepage": "https://pi.dev/packages/pi-tool-guard",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tychenjiajun/pi-tool-guard.git"
@@ -75,7 +62,8 @@
     "extensions": [
       "./index.ts"
     ],
-    "image": "./assets/preview.svg"
+    "image": "https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/preview.png",
+    "video": "https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/demo.mp4"
   },
   "engines": {
     "node": ">=22.19.0"

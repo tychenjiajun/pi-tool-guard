@@ -3,7 +3,7 @@
 English | [简体中文](./docs/README.zh-CN.md)
 
 <p align="center">
-  <img src="./assets/preview.svg" alt="pi-tool-guard runs an expensive bash command once, keeps its full log on disk, and returns only the head/tail/grep projection the model asked for" width="880">
+  <img src="https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/preview.png" alt="pi-tool-guard runs an expensive bash command once, keeps its full log on disk, and returns only the head/tail/grep projection the model asked for" width="880">
 </p>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -21,6 +21,10 @@ English | [简体中文](./docs/README.zh-CN.md)
 > a minutes-long command is run **once** and its full log kept so it is never
 > re-run just to see another slice; and a call with the wrong argument names is
 > rewritten, so it never fails.*
+
+**Install:** `pi install npm:pi-tool-guard` — see it on the
+[pi.dev packages gallery](https://pi.dev/packages/pi-tool-guard) and in the
+[pi packages documentation](https://pi.dev/docs/latest/packages).
 
 **pi-tool-guard** is an open-source (MIT), TypeScript extension for the
 [pi](https://github.com/earendil-works/pi) AI coding agent. It brings two
@@ -118,6 +122,8 @@ Two independent guards, both installed automatically at session start:
 
 ## Before → after
 
+<img src="https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/demo.gif" alt="Demo: without the guard a minutes-long vitest suite re-runs just to see another slice; with the guard it runs once, keeps its full log, and follow-up slices are instant reads" width="880">
+
 **Alias repair** — no error, no retry:
 
 ```jsonc
@@ -205,6 +211,11 @@ and the trailing pipeline is classified as **view** or **transform**:
 | **View** (stripped) | `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more` | Removed and re-applied by the guard to the full output |
 | **Transform** (kept) | `sed`, `awk`, `cut`, `sort`, `uniq`, `wc`, `column`, `jq`, `yq`, `tr` | Left in the command; the shell applies it, the guard stays out of the way |
 
+Only the trailing run of **views** is removed. A transform stops that run
+rather than poisoning it: in `du -sh * | sort -rh | head -15` the guard removes
+just `head -15` and the shell still applies `sort -rh`, so the re-applied view
+sees exactly what the original pipeline produced.
+
 Only view extractors are stripped: `npm test | grep FAIL | head -5` becomes
 `npm test`, and the guard re-applies `grep FAIL | head -5` itself. Stripping
 happens in `execute` (not `prepareArguments`), so `tool_result.input.command`
@@ -229,6 +240,11 @@ redirects) needs no sink at all. The guard leaves the command completely
 untouched when it cannot be faithful:
 
 - a statement that carries its own extractor (`a | head && b | tail`),
+- a pipeline containing an **unbounded producer** — `tail -f`/`-F`/`--follow`,
+  `yes`, `journalctl -f`, `watch`, or an un-counted `ping`. The removed view may
+  be the only thing that terminates it, so `tail -f build.log | grep -m 1 DONE`
+  is left alone rather than turned into a command that never exits. `timeout 5
+  tail -f x | head` is still stripped because `timeout` is bounded,
 - a **backgrounded** final statement (`… &`) — slicing out the view would drop
   the `&` and silently foreground the job,
 - a command containing a **here-document** (its body lives outside the
@@ -361,11 +377,11 @@ Bash flow:
 1. `execute` parses the command and strips trailing **view** extractors,
    hoisting any non-silent statements it must preserve.
 2. The cleaned command runs through the original built-in execute.
-3. Fast + truncated → run the extractor against pi's full-output file via
-   `pi.exec`. Fast + inline → pipe the result through the extractor. Either
-   way the projection is re-capped to pi's 2000-line / 50KB model-facing
-   limit (`capModelOutput`), with the `[Showing … Full output: <path>]`
-   banner when the cap trimmed it.
+3. A plain trailing `head`/`tail` is applied **in-process**; any other removed
+   pipeline runs through `pi.exec` — against pi's full-output file when pi
+   truncated, otherwise over the inline result text. Either way the projection
+   is re-capped to pi's 2000-line / 50KB model-facing limit (`capModelOutput`),
+   with the `[Showing … Full output: <path>]` banner when the cap trimmed it.
 4. Slow → persist the full, unextracted output, project, and append the
    Full-Output Readback notice.
 5. Non-zero exit → pi resolves an `isError` result ending in
@@ -394,33 +410,45 @@ Documented, intentional behaviors — not bugs:
   payload keeps `truncated`/`full_output_path` (the unprojected log) and takes
   the projected `output`, the view's `exit_code`, and the guarded run's
   `wall_time_seconds`.
-- **Transform extractors are never stripped.** `sed`, `awk`, `jq`, `sort`, …
-  stay in the command on purpose.
+- **Transform extractors are never stripped** — but a view after one still
+  is. `sed`, `awk`, `jq`, `sort`, … stay in the command on purpose; the guard
+  removes only the trailing run of views.
+- **Unbounded producers are left untouched.** A pipeline whose producer never
+  ends on its own (see above) is never projected, because the removed view may
+  be its only terminator.
 - **No session scanning and no replay.** Every invocation executes the command
   again; the guard never returns a cached run.
 
 ## FAQ
 
-**Is it safe?** Yes. The guard only rewrites tool *arguments* and *re-applies a
+### Is pi-tool-guard safe?
+
+Yes. The guard only rewrites tool *arguments* and *re-applies a
 shell command the model already asked for*. It never invents a command, never
 runs anything the model did not write, and never deletes output — the full log
 is always persisted for slow runs.
 
-**Does it replace pi's built-in tools?** It re-registers their definitions with
+### Does it replace pi's built-in tools?
+
+It re-registers their definitions with
 a small `prepareArguments` / `execute` shim, keeping the original schema and
 behavior. Disable the extension and the built-in tools are untouched.
 
 **Why strip `head`/`tail`/`grep` but not `sed`/`jq`?** View extractors only
 *filter* the stream, so removing and re-applying one is lossless. Transform
 extractors *change* the data; stripping them would silently drop the
-transformation. The guard leaves them in the shell.
+transformation. The guard leaves them in the shell — but it still removes a
+view that follows one (`… | sort -rh | head -15` keeps `sort -rh` and projects
+`head -15`).
 
 **What happens to the output the model didn't ask for?** For fast commands it
 never leaves the process. For slow commands it is written to
 `pi-bash-guard-<hex>.log` and pointed at by a Full-Output Readback notice, so
 the model can `read` it on demand instead of re-running an expensive command.
 
-**How is this different from pi's built-in `fullOutputPath`?** Pi only writes
+### How is this different from pi's built-in `fullOutputPath`?
+
+Pi only writes
 that file when a result is large enough to truncate. A projected slow command —
 say `npm run build | grep error`, whose full output is still under 50 KB —
 otherwise leaves no complete log at all. The guard writes one for every slow
@@ -433,7 +461,9 @@ output, and Pi's truncation file covers the oversized case.)
 evidence-preserving reducer can interoperate, and it never scans sessions or
 mutates other tools.
 
-**Does it need configuration?** No. Install and it works. `FAST_THRESHOLD_MS`
+### Does it need configuration?
+
+No. Install and it works. `FAST_THRESHOLD_MS`
 (10 s) and `FULL_OUTPUT_TTL_MS` (24 h) are the only tunables, both internal
 constants today.
 

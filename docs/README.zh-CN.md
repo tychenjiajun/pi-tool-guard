@@ -3,7 +3,7 @@
 [English](../README.md) | 简体中文
 
 <p align="center">
-  <img src="../assets/preview.svg" alt="pi-tool-guard 让昂贵的 bash 命令只跑一次，把完整日志留在磁盘上，只返回模型所要的 head/tail/grep 投影" width="880">
+  <img src="https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/preview.png" alt="pi-tool-guard 让昂贵的 bash 命令只跑一次，把完整日志留在磁盘上，只返回模型所要的 head/tail/grep 投影" width="880">
 </p>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
@@ -20,6 +20,10 @@
 > **一句话：** *pi-tool-guard 给每次工具调用两次机会——一条要跑几分钟的命令
 > **只跑一次**并留住完整日志，从此不必为了看另一段而重跑；一次参数名写错的
 > 调用会被改写，从此不会失败。*
+
+**安装：** `pi install npm:pi-tool-guard` —— 在
+[pi.dev 包画廊](https://pi.dev/packages/pi-tool-guard)与
+[pi 包文档](https://pi.dev/docs/latest/packages)中可见。
 
 **pi-tool-guard** 是一个开源（MIT）、TypeScript 编写的
 [pi](https://github.com/earendil-works/pi) AI 编码代理扩展。它给每个会话带来两个
@@ -111,6 +115,8 @@ pi -e npm:pi-tool-guard
 | **Bash 管道投影** | `bash` | 尾部的**视图提取器**（`head`、`tail`、`grep`、`rg`……） | 运行清洗后的命令，重新应用视图，并把完整输出留在磁盘上 |
 
 ## 之前 → 之后
+
+<img src="https://raw.githubusercontent.com/tychenjiajun/pi-tool-guard/main/assets/demo.gif" alt="演示：没有 guard 时，几分钟的 vitest 套件为了看另一段输出而重跑；有 guard 时它只跑一次、留住完整日志，后续切片即刻读取" width="880">
 
 **别名修复**——不报错、不重试：
 
@@ -357,11 +363,15 @@ Bash 流程：
 
 ## 常见问题
 
-**安全吗？** 安全。guard 只重写工具的*参数*，并*重新应用模型本就要执行的 shell
+### pi-tool-guard 安全吗？
+
+安全。guard 只重写工具的*参数*，并*重新应用模型本就要执行的 shell
 命令*。它从不凭空造命令，从不运行模型没写的东西，也从不删除输出——慢速运行的
 完整日志始终被持久化。
 
-**它会替换 pi 的内置工具吗？** 它用一个很小的 `prepareArguments` / `execute`
+### 它会替换 pi 的内置工具吗？
+
+它用一个很小的 `prepareArguments` / `execute`
 垫片重新注册工具定义，保留原始 schema 与行为。禁用扩展，内置工具不受影响。
 
 **为什么剥离 `head`/`tail`/`grep` 而不剥离 `sed`/`jq`？** 视图提取器只*过滤*
@@ -372,7 +382,9 @@ guard 把它们留给 shell。
 `pi-bash-guard-<hex>.log`，并由完整输出回读通知指向，模型可以按需 `read`，而
 不是重跑昂贵命令。
 
-**这和 pi 内置的 `fullOutputPath` 有什么区别？** pi 只在结果大到需要截断时才写
+### 这和 pi 内置的 `fullOutputPath` 有什么区别？
+
+pi 只在结果大到需要截断时才写
 这个文件。一条被投影的慢命令——比如 `npm run build | grep error`，完整输出仍不足
 50 KB——原本就完全没有完整日志。guard 会为每一条被它投影的慢命令写一份，因此未
 投影的输出始终可读。（没有视图的慢命令会直接透传；模型本就看到了它的完整输出，
@@ -381,7 +393,9 @@ guard 把它们留给 shell。
 **能与其他扩展共存吗？** 可以——它发布 `details.piToolGuard`，让 SoL-Pi 的证据
 保留 reducer 等下游消费者互操作；它从不扫描会话，也不改动其他工具。
 
-**需要配置吗？** 不需要。装上即用。`FAST_THRESHOLD_MS`（10 秒）与
+### 需要配置吗？
+
+不需要。装上即用。`FAST_THRESHOLD_MS`（10 秒）与
 `FULL_OUTPUT_TTL_MS`（24 小时）是目前仅有的两个内部常量。
 
 ## 相关 pi 扩展
