@@ -79,10 +79,10 @@
     "@earendil-works/pi-coding-agent": "^1.5.0",
     "@earendil-works/pi-tui": "^1.5.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.1.0"
   },
   "packageManager": "pnpm@12.6.0",
   "dependencies": {
-    "unbash": "^4.0.11"
+    "unbash": "^6.0.3"
   }
 }

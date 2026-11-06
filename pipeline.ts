@@ -1,4 +1,4 @@
-import { parse, type Node } from "unbash";
+import { parse, type SyntaxNode, type Word } from "unbash";
 
 // ---------------------------------------------------------------------------
 // pipeline extractor stripping (unbash AST)
@@ -108,7 +108,7 @@ interface Edit extends Range {
  * extractor will read. A command with no name is an assignment (`FOO=bar`),
  * which is silent.
  */
-function isSilentSimpleCommand(node: Node | undefined): boolean {
+function isSilentSimpleCommand(node: SyntaxNode | undefined): boolean {
   if (!node || node.type !== "Command") return false;
   if (node.redirects.length > 0) return false;
   const name = node.name?.text;
@@ -122,7 +122,7 @@ function isSilentSimpleCommand(node: Node | undefined): boolean {
  * hoisted into a side channel. Anything grouped (`(...)`, `{ ...; }`) or
  * backgrounded is never assumed silent.
  */
-function isSilentPrefix(node: Node | undefined): boolean {
+function isSilentPrefix(node: SyntaxNode | undefined): boolean {
   if (!node) return false;
   if (node.type === "Statement") {
     if (node.background === true) return false;
@@ -264,18 +264,20 @@ function isPingBound(value: string): boolean {
  * there too. The set is deliberately a small, provable whitelist. `timeout
  * 5 tail -f x | head` stays strippable because `timeout` is bounded.
  */
-function isUnboundedProducer(cmd: Node): boolean {
+function isUnboundedProducer(cmd: SyntaxNode): boolean {
   if (cmd.type !== "Command") return false;
   const name = cmd.name?.text;
   if (name === undefined) return false;
   if (name === "yes" || name === "watch") return true;
-  const argv = cmd.suffix.map((word) => word.value ?? word.text);
+  const argv = cmd.suffix
+    .filter((item): item is Word => item.type === "Word")
+    .map((word) => word.value ?? word.text);
   if (name === "tail" || name === "journalctl") return argv.some(isFollowFlag);
   if (name === "ping") return !argv.some(isPingBound);
   return false;
 }
 
-function isHoistable(command: string, node: Node): boolean {
+function isHoistable(command: string, node: SyntaxNode): boolean {
   // `background` only exists on a Statement; an AndOr member is backgrounded by
   // its enclosing statement, which is checked when the statement is visited.
   if (node.type === "Statement" && node.background === true) return false;
@@ -293,7 +295,7 @@ function isHoistable(command: string, node: Node): boolean {
  */
 function planTargetAt(
   command: string,
-  stmts: Node[],
+  stmts: readonly SyntaxNode[],
   targetIndex: number,
 ): ProjectionPlan | undefined {
   const stmt = stmts[targetIndex];
@@ -301,11 +303,11 @@ function planTargetAt(
 
   // Walk into AndOr → Pipeline, collecting the AndOr members that run before
   // the final pipeline (`cd x && npm test | tail`).
-  const members: Node[] = [];
-  let inner: Node | undefined = stmt.command;
+  const members: SyntaxNode[] = [];
+  let inner: SyntaxNode | undefined = stmt.command;
   while (inner && inner.type === "AndOr") {
-    const list: Node[] = inner.commands;
-    const lastCmd: Node | undefined = list[list.length - 1];
+    const list: readonly SyntaxNode[] = inner.commands;
+    const lastCmd: SyntaxNode | undefined = list[list.length - 1];
     if (!lastCmd) return undefined;
     members.push(...list.slice(0, -1));
     inner = lastCmd;
@@ -435,7 +437,7 @@ export function stripTrailingExtractors(
     return undefined;
   }
 
-  const stmts: Node[] = ast.commands;
+  const stmts: readonly SyntaxNode[] = ast.commands;
   if (stmts.length === 0) return undefined;
 
   // The eligible window is the *last* statement that is a strippable pipeline.
