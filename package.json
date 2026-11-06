@@ -1,6 +1,6 @@
 {
   "name": "pi-tool-guard",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "description": "Pi extension: runs an expensive bash command once and keeps its full log so the agent reads any slice instead of re-running, repairs LLM tool-call arguments (edit/write/read aliases plus trailing head/tail/grep pipeline extractors), and renames a misspelled tool call before pi dispatches it.",
   "main": "index.ts",
@@ -76,8 +76,8 @@
     "@earendil-works/pi-tui": ">=0.99.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.4.0",
-    "@earendil-works/pi-tui": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@earendil-works/pi-tui": "^1.5.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   },
